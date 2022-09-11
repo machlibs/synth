@@ -49,10 +49,10 @@ pub const Square = struct {
     fn polyblep(phase: f32, phaseInc: f32) f32 {
         if (phase < phaseInc) {
             var t = phase / phaseInc;
-            return t + t - t * t;
+            return (t + t) - (t * t);
         } else if (phase > 1.0 - phaseInc) {
             var t = (phase - (1.0 - phaseInc)) / phaseInc;
-            return 1.0 - (t + t - t * t);
+            return 1.0 - ((t + t) - (t * t));
         } else {
             return 1.0;
         }
@@ -63,13 +63,17 @@ pub const Square = struct {
         const phaseInc = (square.frequency) / @intToFloat(f32, sample_rate);
         square.phase += phaseInc;
 
+        if (square.phase >= 1) {
+            square.phase -= 1;
+        }
+
         const phase = square.phase;
         var dutyPhase: f32 = 0;
         var dutyPhaseInc: f32 = 0;
         var multiplier: f32 = 1;
         if (phase < square.dutyCycle) {
             dutyPhase = phase / square.dutyCycle;
-            dutyPhaseInc = phase / square.dutyCycle;
+            dutyPhaseInc = phaseInc / square.dutyCycle;
             multiplier = 1;
         } else {
             dutyPhase = (phase - square.dutyCycle) / (1.0 - square.dutyCycle);

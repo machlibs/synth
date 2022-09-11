@@ -11,7 +11,7 @@ pub const App = @This();
 
 audio: sysaudio,
 device: *sysaudio.Device,
-tone_engine: ToneEngine = .{},
+tone_engine: ToneEngine = undefined,
 
 pub fn init(app: *App, core: *mach.Core) !void {
     const audio = try sysaudio.init();
@@ -25,6 +25,7 @@ pub fn init(app: *App, core: *mach.Core) !void {
 
     app.audio = audio;
     app.device = device;
+    app.tone_engine = .{};
 }
 
 fn callback(device: *sysaudio.Device, user_data: ?*anyopaque, buffer: []u8) void {
@@ -45,7 +46,7 @@ pub fn update(app: *App, engine: *mach.Core) !void {
         switch (event) {
             .key_press => |ev| {
                 try app.device.start();
-                app.tone_engine.play(app.device.properties, ToneEngine.keyToFrequency(ev.key));
+                app.tone_engine.play(app.device.properties, 0, ToneEngine.keyToFrequency(ev.key));
             },
             else => {},
         }
@@ -76,10 +77,10 @@ pub const ToneEngine = struct {
     time: usize = 0,
     /// Wasm4 has 4 channels with predefined waveforms
     channels: [4]synth.Oscillator = .{
-        .Square = .{},
-        .Square = .{},
-        .Triangle = .{},
-        .Noise = .{ .seed = 0x01 },
+        .{.Square = .{.dutyCycle = 0.5}},
+        .{.Square = .{.dutyCycle = 0.5}},
+        .{.Triangle = .{}},
+        .{.Noise = .{ .seed = 0x01 }},
     },
     /// Envelopes for playing tones
     envelopes: [4]synth.APDHSR = std.mem.zeroes([4]synth.APDHSR),
@@ -107,20 +108,18 @@ pub const ToneEngine = struct {
     }
 
     pub fn renderWithType(comptime T: type, engine: *ToneEngine, properties: sysaudio.Device.Properties, buffer: []T) void {
-        const sample_rate = @intToFloat(f32, properties.sample_rate);
         const frames = buffer.len / properties.channels;
 
         var frame: usize = 0;
         while (frame < frames) : (frame += 1) {
             // Render the sample for this frame (e.g. for both left and right audio channels.)
             var sample: f32 = 0;
-            for (engine.channels) |*channel, i| {
-                sample = switch (channel) {
-                    .Square => |*square| square.sample(sample_rate),
-                    .Triangle => |*triangle| triangle.sample(sample_rate),
-                    .Noise => |*noise| noise.sample(sample_rate),
-                };
-                sample *= engine.envelopes[i].sample(engine.time + frame) * 0.01;
+            for (engine.channels) |_, i| {
+                switch (engine.channels[i]) {
+                    .Square => |*square| sample += square.sample(properties.sample_rate) * engine.envelopes[i].sample(engine.time + frame) * 0.1,
+                    .Triangle => |*triangle| sample += triangle.sample(properties.sample_rate) * engine.envelopes[i].sample(engine.time + frame) * 0.1,
+                    .Noise => |*noise| sample += noise.sample(properties.sample_rate) * engine.envelopes[i].sample(engine.time + frame) * 0.1,
+                }
             }
 
             const sample_t: T = sample: {
@@ -143,11 +142,18 @@ pub const ToneEngine = struct {
 
     pub fn play(engine: *ToneEngine, properties: sysaudio.Device.Properties, channel: usize, frequency: f32) void {
         switch (engine.channels[channel]) {
-            .Square => |*square| square.frequency = frequency,
+            .Square => |*square| square.frequency = frequency ,
             .Triangle => |*triangle| triangle.frequency = frequency,
             .Noise => |*noise| noise.frequency = frequency,
         }
-        engine.envelopes[channel].start(properties.sample_rate);
+        const sample_rate = @intToFloat(f32, properties.sample_rate);
+        engine.envelopes[channel].attack = @floatToInt(usize, sample_rate * 0.1);
+        engine.envelopes[channel].peak = 1;
+        engine.envelopes[channel].decay = @floatToInt(usize, sample_rate * 0.1);
+        engine.envelopes[channel].hold =  @floatToInt(usize, sample_rate * 0.1);
+        engine.envelopes[channel].sustain = 0.5;
+        engine.envelopes[channel].release = @floatToInt(usize, sample_rate * 0.1);
+        engine.envelopes[channel].start(engine.time);
     }
 
     pub fn keyToFrequency(key: mach.Key) f32 {

@@ -2,6 +2,7 @@
 const std = @import("std");
 const mach = @import("mach");
 const gpu = @import("gpu");
+const synth = @import("synth");
 const sysaudio = mach.sysaudio;
 const js = mach.sysjs;
 const builtin = @import("builtin");
@@ -71,13 +72,17 @@ pub fn update(app: *App, engine: *mach.Core) !void {
 // out using 1-log10(x*10) (google it to see how it looks, it's strong for most of the duration of
 // the note then fades out slowly.)
 pub const ToneEngine = struct {
-    playing: [2048]Tone = std.mem.zeroes([2048]Tone),
-
-    const Tone = struct {
-        frequency: f32,
-        sample_counter: usize,
-        duration: usize,
-    };
+    /// The time in samples
+    time: usize = 0,
+    /// Wasm4 has 4 channels with predefined waveforms
+    channels: [4]synth.Oscillator = .{
+        .Square = .{},
+        .Square = .{},
+        .Triangle = .{},
+        .Noise = .{ .seed = 0x01 },
+    },
+    /// Envelopes for playing tones
+    envelopes: [4]synth.APDHSR = std.mem.zeroes([4]synth.APDHSR),
 
     pub fn render(engine: *ToneEngine, properties: sysaudio.Device.Properties, buffer: []u8) void {
         switch (properties.format) {
@@ -109,29 +114,13 @@ pub const ToneEngine = struct {
         while (frame < frames) : (frame += 1) {
             // Render the sample for this frame (e.g. for both left and right audio channels.)
             var sample: f32 = 0;
-            for (engine.playing) |*tone| {
-                if (tone.sample_counter >= tone.duration) {
-                    continue;
-                }
-                tone.sample_counter += 1;
-                const sample_counter = @intToFloat(f32, tone.sample_counter);
-                const duration = @intToFloat(f32, tone.duration);
-
-                // The sine wave that plays the frequency.
-                const gain = 0.1;
-                const sine_wave = std.math.sin(tone.frequency * 2.0 * std.math.pi * sample_counter / sample_rate) * gain;
-
-                // A number ranging from 0.0 to 1.0 in the first 1/64th of the duration of the tone.
-                const fade_in = std.math.min(sample_counter / (duration / 64.0), 1.0);
-
-                // A number ranging from 1.0 to 0.0 over half the duration of the tone.
-                const progression = sample_counter / duration; // 0.0 (tone start) to 1.0 (tone end)
-                const fade_out = 1.0 - std.math.clamp(std.math.log10(progression * 10.0), 0.0, 1.0);
-
-                // Mix this tone into the sample we'll actually play on e.g. the speakers, reducing
-                // sine wave intensity if we're fading in or out over the entire duration of the
-                // tone.
-                sample += sine_wave * fade_in * fade_out;
+            for (engine.channels) |*channel, i| {
+                sample = switch (channel) {
+                    .Square => |*square| square.sample(sample_rate),
+                    .Triangle => |*triangle| triangle.sample(sample_rate),
+                    .Noise => |*noise| noise.sample(sample_rate),
+                };
+                sample *= engine.envelopes[i].sample(engine.time + frame) * 0.01;
             }
 
             const sample_t: T = sample: {
@@ -149,21 +138,16 @@ pub const ToneEngine = struct {
                 channel_buffer[frame] = sample_t;
             }
         }
+        engine.time += frames;
     }
 
-    pub fn play(engine: *ToneEngine, properties: sysaudio.Device.Properties, frequency: f32) void {
-        const sample_rate = @intToFloat(f32, properties.sample_rate);
-
-        for (engine.playing) |*tone| {
-            if (tone.sample_counter >= tone.duration) {
-                tone.* = Tone{
-                    .frequency = frequency,
-                    .sample_counter = 0,
-                    .duration = @floatToInt(usize, 1.5 * sample_rate), // play the tone for 1.5s
-                };
-                return;
-            }
+    pub fn play(engine: *ToneEngine, properties: sysaudio.Device.Properties, channel: usize, frequency: f32) void {
+        switch (engine.channels[channel]) {
+            .Square => |*square| square.frequency = frequency,
+            .Triangle => |*triangle| triangle.frequency = frequency,
+            .Noise => |*noise| noise.frequency = frequency,
         }
+        engine.envelopes[channel].start(properties.sample_rate);
     }
 
     pub fn keyToFrequency(key: mach.Key) f32 {

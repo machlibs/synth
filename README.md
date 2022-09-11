@@ -7,11 +7,11 @@ to change.
 ## TODO
 
 - [ ] Simple oscillators
-  - [ ] Square
+  - [x] Square
   - [ ] Sine
   - [ ] Sawtooth
-  - [ ] Triangle
-  - [ ] Noise
+  - [x] Triangle
+  - [x] Noise
 - [ ] MIDI Support
   - [ ] Standard MIDI Files (.midi)
   - [ ] Input/Output

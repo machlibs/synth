@@ -1,6 +1,12 @@
 const std = @import("std");
 const mach = @import("deps/mach/build.zig");
 
+pub const pkg = std.build.Pkg{
+    .name = "synth",
+    .source = .{ .path = thisDir() ++ "/src/main.zig" },
+    .dependencies = null,
+};
+
 pub fn build(b: *std.build.Builder) void {
     // Standard release options allow the person running `zig build` to select
     // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall.
@@ -21,10 +27,11 @@ pub fn build(b: *std.build.Builder) void {
 
     const example_app = mach.App.init(b, .{
         .name = "wasm4-apu",
-        .src = "examples/wasm4.zig",
+        .src = (comptime thisDir() ++ "/examples/wasm4.zig"),
         .target = target,
     });
     example_app.step.step.dependOn(&lib.step);
+    example_app.step.addPackage(pkg);
     example_app.setBuildMode(mode);
     example_app.link(options);
     example_app.install();
@@ -37,4 +44,8 @@ pub fn build(b: *std.build.Builder) void {
 
     const example_run_step = b.step("run-example-wasm4-apu", "Run wasm4-apu example");
     example_run_step.dependOn(&example_run_cmd.step);
+}
+
+fn thisDir() []const u8 {
+    return std.fs.path.dirname(@src().file) orelse ".";
 }

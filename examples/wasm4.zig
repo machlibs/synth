@@ -89,6 +89,10 @@ pub const ToneEngine = struct {
     },
     /// Envelopes for playing tones
     envelopes: [4]synth.APDHSR = std.mem.zeroes([4]synth.APDHSR),
+    /// Controls overall volume
+    volume: f32 = 0x1333.0 / 0xFFFF.0,
+    /// Controls
+    volume_triangle: f32 = 0x2000.0 / 0xFFFF.0,
 
     pub fn render(engine: *ToneEngine, properties: sysaudio.Device.Properties, buffer: []u8) void {
         switch (properties.format) {
@@ -121,9 +125,9 @@ pub const ToneEngine = struct {
             var sample: f32 = 0;
             for (engine.channels) |_, i| {
                 switch (engine.channels[i]) {
-                    .Square => |*square| sample += square.sample(properties.sample_rate) * engine.envelopes[i].sample(engine.time + frame) * 0.1,
-                    .Triangle => |*triangle| sample += triangle.sample(properties.sample_rate) * engine.envelopes[i].sample(engine.time + frame) * 0.1,
-                    .Noise => |*noise| sample += noise.sample(properties.sample_rate) * engine.envelopes[i].sample(engine.time + frame) * 0.1,
+                    .Square => |*square| sample += square.sample(properties.sample_rate) * engine.envelopes[i].sample(engine.time + frame) * engine.volume,
+                    .Triangle => |*triangle| sample += triangle.sample(properties.sample_rate) * engine.envelopes[i].sample(engine.time + frame) * engine.volume_triangle,
+                    .Noise => |*noise| sample += noise.sample(properties.sample_rate) * engine.envelopes[i].sample(engine.time + frame) * engine.volume,
                 }
             }
 

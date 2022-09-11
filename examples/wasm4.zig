@@ -12,6 +12,7 @@ pub const App = @This();
 audio: sysaudio,
 device: *sysaudio.Device,
 tone_engine: ToneEngine = undefined,
+channel: usize = 0,
 
 pub fn init(app: *App, core: *mach.Core) !void {
     const audio = try sysaudio.init();
@@ -46,7 +47,11 @@ pub fn update(app: *App, engine: *mach.Core) !void {
         switch (event) {
             .key_press => |ev| {
                 try app.device.start();
-                app.tone_engine.play(app.device.properties, 0, ToneEngine.keyToFrequency(ev.key));
+                if (ev.key == .tab) {
+                    app.channel += 1;
+                    app.channel %= 4;
+                }
+                app.tone_engine.play(app.device.properties, app.channel, ToneEngine.keyToFrequency(ev.key));
             },
             else => {},
         }

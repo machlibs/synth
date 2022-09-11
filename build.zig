@@ -13,10 +13,6 @@ pub fn build(b: *std.build.Builder) void {
     const mode = b.standardReleaseOptions();
     const target = b.standardTargetOptions(.{});
 
-    const lib = b.addStaticLibrary("synth", "src/main.zig");
-    lib.setBuildMode(mode);
-    lib.install();
-
     const main_tests = b.addTest("src/main.zig");
     main_tests.setBuildMode(mode);
 
@@ -29,9 +25,8 @@ pub fn build(b: *std.build.Builder) void {
         .name = "wasm4-apu",
         .src = (comptime thisDir() ++ "/examples/wasm4.zig"),
         .target = target,
+        .deps = &.{pkg},
     });
-    example_app.step.step.dependOn(&lib.step);
-    example_app.step.addPackage(pkg);
     example_app.setBuildMode(mode);
     example_app.link(options);
     example_app.install();

@@ -98,6 +98,9 @@ pub const Triangle = struct {
 
     pub fn sample(triangle: *Triangle, sample_rate: usize) f32 {
         triangle.phase += (triangle.frequency) / @intToFloat(f32, sample_rate);
+        if (triangle.phase >= 1) {
+            triangle.phase -= 1;
+        }
         return (2 * @fabs(2 * triangle.phase - 1) - 1);
     }
 };

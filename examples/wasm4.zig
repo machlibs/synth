@@ -52,6 +52,7 @@ pub fn update(app: *App, engine: *mach.Core) !void {
                     app.channel %= 4;
                 }
                 app.tone_engine.play(app.device.properties, app.channel, ToneEngine.keyToFrequency(ev.key));
+                std.debug.print("channel: {}\n", .{app.channel});
             },
             else => {},
         }
@@ -65,27 +66,16 @@ pub fn update(app: *App, engine: *mach.Core) !void {
     }
 }
 
-// A simple tone engine.
-//
-// It renders 2048 tones simultaneously, each with their own frequency and duration.
-//
-// `keyToFrequency` can be used to convert a keyboard key to a frequency, so that the
-// keys asdfghj on your QWERTY keyboard will map to the notes C/D/E/F/G/A/B[4], the
-// keys above qwertyu will map to C5 and the keys below zxcvbnm will map to C3.
-//
-// The duration is hard-coded to 1.5s. To prevent clicking, tones are faded in linearly over
-// the first 1/64th duration of the tone. To provide a cool sustained effect, tones are faded
-// out using 1-log10(x*10) (google it to see how it looks, it's strong for most of the duration of
-// the note then fades out slowly.)
+// A simple synthesizer emulating the WASM4 APU.
 pub const ToneEngine = struct {
     /// The time in samples
     time: usize = 0,
     /// Wasm4 has 4 channels with predefined waveforms
     channels: [4]synth.Oscillator = .{
-        .{.Square = .{.dutyCycle = 0.5}},
-        .{.Square = .{.dutyCycle = 0.5}},
-        .{.Triangle = .{}},
-        .{.Noise = .{ .seed = 0x01 }},
+        .{ .Square = .{ .dutyCycle = 0.5 } },
+        .{ .Square = .{ .dutyCycle = 0.5 } },
+        .{ .Triangle = .{} },
+        .{ .Noise = .{ .seed = 0x01 } },
     },
     /// Envelopes for playing tones
     envelopes: [4]synth.APDHSR = std.mem.zeroes([4]synth.APDHSR),
@@ -151,7 +141,7 @@ pub const ToneEngine = struct {
 
     pub fn play(engine: *ToneEngine, properties: sysaudio.Device.Properties, channel: usize, frequency: f32) void {
         switch (engine.channels[channel]) {
-            .Square => |*square| square.frequency = frequency ,
+            .Square => |*square| square.frequency = frequency,
             .Triangle => |*triangle| triangle.frequency = frequency,
             .Noise => |*noise| noise.frequency = frequency,
         }
@@ -159,7 +149,7 @@ pub const ToneEngine = struct {
         engine.envelopes[channel].attack = @floatToInt(usize, sample_rate * 0.1);
         engine.envelopes[channel].peak = 1;
         engine.envelopes[channel].decay = @floatToInt(usize, sample_rate * 0.1);
-        engine.envelopes[channel].hold =  @floatToInt(usize, sample_rate * 0.1);
+        engine.envelopes[channel].hold = @floatToInt(usize, sample_rate * 0.1);
         engine.envelopes[channel].sustain = 0.5;
         engine.envelopes[channel].release = @floatToInt(usize, sample_rate * 0.1);
         engine.envelopes[channel].start(engine.time);

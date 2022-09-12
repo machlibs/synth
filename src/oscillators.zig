@@ -43,7 +43,7 @@ pub const Square = struct {
     phase: f32 = 0,
     /// The length of the pulse relative to the period of the wave
     dutyCycle: f32 = 0.5,
-    /// The
+    /// The frequency of the wave
     frequency: f32 = 0,
 
     fn polyblep(phase: f32, phaseInc: f32) f32 {

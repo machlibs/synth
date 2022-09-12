@@ -53,6 +53,7 @@ pub const APDHSR = struct {
 
     /// Returns the amplitude of the envelope for the time given
     pub fn sample(env: *APDHSR, time: usize) f32 {
+        if (time == 0) return 0;
         if (time > env.releaseTime) {
             // Finished
             return 0;

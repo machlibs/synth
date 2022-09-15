@@ -17,11 +17,12 @@ pub fn build(b: *std.build.Builder) !void {
     const test_step = b.step("test", "Run library tests");
     test_step.dependOn(&main_tests.step);
 
+    const mach_path_opt = b.option([]const u8, "mach-path", "Uses the given path for mach instead of cloning the repository (requires symlink support)");
     const example_opt = b.option([]const u8, "example", "Build an example (wasm4-apu)");
     const run_opt = b.option(bool, "run", "If example should be run");
 
     if (run_opt != null and example_opt == null) {
-        std.log.err("Please specify an example to run with --example", .{});
+        std.log.err("Please specify an example to run with -Dexample=[example]", .{});
         return error.NoExampleSpecified;
     }
 
@@ -38,8 +39,12 @@ pub fn build(b: *std.build.Builder) !void {
             try arglist.append(run_cmd);
         }
 
-        ensureGit(b.allocator);
-        ensureDependencySubmodule(b.allocator, "libs/mach") catch unreachable;
+        if (mach_path_opt) |mach_path| {
+            try std.os.symlink(mach_path, "libs/mach");
+        } else {
+            ensureGit(b.allocator);
+            ensureDependencySubmodule(b.allocator, "libs/mach") catch unreachable;
+        }
 
         // Now that the dependencies are installed, run the compile step
         var child = std.ChildProcess.init(arglist.items, b.allocator);

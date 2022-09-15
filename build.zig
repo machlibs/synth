@@ -17,7 +17,7 @@ pub fn build(b: *std.build.Builder) !void {
     const test_step = b.step("test", "Run library tests");
     test_step.dependOn(&main_tests.step);
 
-    const mach_path_opt = b.option([]const u8, "mach-path", "Uses the given path for mach instead of cloning the repository (requires symlink support)");
+    const mach_path_opt = b.option([]const u8, "mach-path", "Uses the given path for mach instead of cloning the repository (requires symlinks)");
     const example_opt = b.option([]const u8, "example", "Build an example (wasm4-apu)");
     const run_opt = b.option(bool, "run", "If example should be run");
 
@@ -40,7 +40,10 @@ pub fn build(b: *std.build.Builder) !void {
         }
 
         if (mach_path_opt) |mach_path| {
-            try std.os.symlink(mach_path, "libs/mach");
+            std.os.symlink(mach_path, "libs/mach") catch |e| switch (e) {
+                error.PathAlreadyExists => {},
+                else => return e,
+            };
         } else {
             ensureGit(b.allocator);
             ensureDependencySubmodule(b.allocator, "libs/mach") catch unreachable;

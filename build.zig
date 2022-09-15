@@ -17,9 +17,6 @@ pub fn build(b: *std.build.Builder) !void {
     const test_step = b.step("test", "Run library tests");
     test_step.dependOn(&main_tests.step);
 
-    ensureGit(b.allocator);
-    ensureDependencySubmodule(b.allocator, "libs/mach") catch unreachable;
-
     const example_opt = b.option([]const u8, "example", "Build an example (wasm4-apu)");
     const run_opt = b.option(bool, "run", "If example should be run");
 
@@ -28,10 +25,11 @@ pub fn build(b: *std.build.Builder) !void {
         return error.NoExampleSpecified;
     }
 
-    var arglist = std.ArrayList([]const u8).init(b.allocator);
-    try arglist.appendSlice(&.{ "zig", "build", "--build-file", "compile.zig" });
-
+    // The example code depends on mach, but tests can be run without it
     if (example_opt) |example| {
+        var arglist = std.ArrayList([]const u8).init(b.allocator);
+        try arglist.appendSlice(&.{ "zig", "build", "--build-file", "compile.zig" });
+
         if (run_opt) |_| {
             const run_cmd = b.fmt("run-example-{s}", .{example});
             try arglist.append(run_cmd);
@@ -39,15 +37,18 @@ pub fn build(b: *std.build.Builder) !void {
             const run_cmd = b.fmt("example-{s}", .{example});
             try arglist.append(run_cmd);
         }
+
+        ensureGit(b.allocator);
+        ensureDependencySubmodule(b.allocator, "libs/mach") catch unreachable;
+
+        // Now that the dependencies are installed, run the compile step
+        var child = std.ChildProcess.init(arglist.items, b.allocator);
+        child.cwd = (comptime thisDir());
+        child.stderr = std.io.getStdErr();
+        child.stdout = std.io.getStdOut();
+
+        _ = try child.spawnAndWait();
     }
-
-    // Run zig build on the
-    var child = std.ChildProcess.init(arglist.items, b.allocator);
-    child.cwd = (comptime thisDir());
-    child.stderr = std.io.getStdErr();
-    child.stdout = std.io.getStdOut();
-
-    _ = try child.spawnAndWait();
 }
 
 fn thisDir() []const u8 {

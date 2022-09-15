@@ -49,6 +49,26 @@ pub fn build(b: *std.build.Builder) !void {
             ensureDependencySubmodule(b.allocator, "libs/mach") catch unreachable;
         }
 
+        var iter = b.user_input_options.iterator();
+        while (iter.next()) |option| {
+            if (std.mem.eql(u8, option.key_ptr.*, "example") or
+                std.mem.eql(u8, option.key_ptr.*, "run") or
+                std.mem.eql(u8, option.key_ptr.*, "mach-path")) continue;
+            const opt_str = switch (option.value_ptr.*.value) {
+                .flag => b.fmt("-D{s}", .{option.key_ptr.*}),
+                .scalar => |value| b.fmt("-D{s}={s}", .{ option.key_ptr.*, value }),
+                .list => |value| opt_str: {
+                    var str = std.ArrayList(u8).init(b.allocator);
+                    for (value.items) |item| {
+                        try str.appendSlice(item);
+                    }
+                    break :opt_str b.fmt("-D{s}={s}", .{ option.key_ptr.*, str.items });
+                },
+            };
+            try arglist.append(opt_str);
+            std.log.info("{s}", .{opt_str});
+        }
+
         // Now that the dependencies are installed, run the compile step
         var child = std.ChildProcess.init(arglist.items, b.allocator);
         child.cwd = (comptime thisDir());

@@ -20,23 +20,34 @@ pub fn build(b: *std.build.Builder) !void {
     ensureGit(b.allocator);
     ensureDependencySubmodule(b.allocator, "libs/mach") catch unreachable;
 
-    var child = std.ChildProcess.init(&.{ "zig", "build", "--build-file", "compile.zig" }, b.allocator);
+    const example_opt = b.option([]const u8, "example", "Build an example (wasm4-apu)");
+    const run_opt = b.option(bool, "run", "If example should be run");
+
+    if (run_opt != null and example_opt == null) {
+        std.log.err("Please specify an example to run with --example", .{});
+        return error.NoExampleSpecified;
+    }
+
+    var arglist = std.ArrayList([]const u8).init(b.allocator);
+    try arglist.appendSlice(&.{ "zig", "build", "--build-file", "compile.zig" });
+
+    if (example_opt) |example| {
+        if (run_opt) |_| {
+            const run_cmd = b.fmt("run-example-{s}", .{example});
+            try arglist.append(run_cmd);
+        } else {
+            const run_cmd = b.fmt("example-{s}", .{example});
+            try arglist.append(run_cmd);
+        }
+    }
+
+    // Run zig build on the
+    var child = std.ChildProcess.init(arglist.items, b.allocator);
     child.cwd = (comptime thisDir());
     child.stderr = std.io.getStdErr();
     child.stdout = std.io.getStdOut();
 
     _ = try child.spawnAndWait();
-
-    // const example_compile = b.option(bool, "example-wasm4-apu", "Compile wasm4-apu example");
-
-    // const example_compile_step = b.step("example-wasm4-apu", "Compile wasm4-apu example");
-    // example_compile_step.dependOn(&example_app.getInstallStep().?.step);
-
-    // const example_run_cmd = example_app.run();
-    // example_run_cmd.dependOn(&example_app.getInstallStep().?.step);
-
-    // const example_run_step = b.step("run-example-wasm4-apu", "Run wasm4-apu example");
-    // example_run_step.dependOn(example_run_cmd);
 }
 
 fn thisDir() []const u8 {

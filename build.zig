@@ -47,6 +47,7 @@ pub fn build(b: *std.build.Builder) !void {
         } else {
             ensureGit(b.allocator);
             ensureDependencySubmodule(b.allocator, "libs/mach") catch unreachable;
+            ensureDependencySubmodule(b.allocator, "libs/gui") catch unreachable;
         }
 
         var iter = b.user_input_options.iterator();

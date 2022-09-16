@@ -52,7 +52,7 @@ pub fn update(app: *App, engine: *mach.Core) !void {
                     app.channel %= 4;
                 }
                 app.tone_engine.play(app.device.properties, app.channel, ToneEngine.keyToFrequency(ev.key));
-                std.debug.print("channel: {}\n", .{app.channel});
+                std.debug.print("channel: {}, max samples: {}, min_samples: {}\n", .{ app.channel, app.tone_engine.max_count, app.tone_engine.min_count });
             },
             else => {},
         }
@@ -84,7 +84,12 @@ pub const ToneEngine = struct {
     /// Controls
     volume_triangle: f32 = 0x2000.0 / 0xFFFF.0,
 
+    min_count: usize = std.math.maxInt(usize),
+    max_count: usize = 0,
+
     pub fn render(engine: *ToneEngine, properties: sysaudio.Device.Properties, buffer: []u8) void {
+        engine.min_count = @minimum(engine.min_count, buffer.len / properties.channels);
+        engine.max_count = @maximum(engine.max_count, buffer.len / properties.channels);
         switch (properties.format) {
             .U8 => renderWithType(u8, engine, properties, buffer),
             .S16 => {

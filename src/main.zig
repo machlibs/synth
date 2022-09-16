@@ -7,6 +7,88 @@ comptime {
 
 pub const osc = @import("oscillators.zig");
 
+pub const Unit = enum {
+    Output,
+    Input,
+    Constant,
+    Noise,
+    Square,
+    Triangle,
+};
+
+/// AudioContext is used to store the dataflow graph.
+pub const AudioContext = struct {
+    alloc: std.mem.Allocator,
+    nodes: std.ArrayList(Unit),
+    connection_free: u16,
+    connections: std.ArrayList(Connection),
+
+    const Connection = union(enum) {
+        pair: [2]u16,
+        next: u16,
+    };
+
+    pub fn init(alloc: std.mem.Allocator) !AudioContext {
+        var ctx = AudioContext{
+            .alloc = alloc,
+            // .buffer = try alloc.alloc(f32, max_nodes),
+            .nodes = std.ArrayList.init(alloc),
+            .connections = std.ArrayList(u16).init(),
+            .connection_free = 0,
+        };
+        return ctx;
+    }
+
+    pub fn create(ctx: *AudioContext, unit: Unit) usize {
+        ctx.nodes.append(unit);
+    }
+
+    /// Connect output of one node to input of another. The flow of data is from output to input.
+    pub fn connect(ctx: *AudioContext, input: usize, output: usize) !void {
+        // TODO: deduplicate connections
+        if (ctx.connections.len > ctx.connection_free) {
+            try ctx.connections.append(.{ input, output });
+        } else {}
+        const next = ctx.connections[ctx.connection_free].next;
+        ctx.connection_free = next;
+        ctx.connections[next] = .{ .pair = .{ input, output } };
+    }
+
+    /// Disconnect output of one node from the input of another
+    pub fn disconnect(ctx: *AudioContext, input: usize, output: usize) !void {
+        for (ctx.connections.items()) |connection, i| {
+            if (connection[0] == input and connection[1] == output) {
+                ctx.connections.swapRemove(i);
+                break;
+            }
+        }
+    }
+};
+
+// const MAX = 4096;
+// var buffer: [MAX * @sizeOf(UnitGenerator)]u8 = undefined;
+// var fba = std.heap.FixedBufferAllocator.init(&buffer);
+// var R = std.ArrayList(UnitGenerator).initCapacity(fba.allocator, UnitGenerator);
+
+/// Recursively add inputs to the schedule, then add self
+fn resolve(R: *std.ArrayList(UnitGenerator), u: UnitGenerator) !void {
+    for (R.items) |r| {
+        if (u == r) return error.FeedbackLoop;
+    }
+    for (u.inputs) |input| {
+        resolve(R, input);
+    }
+    try R.append(u);
+}
+
+/// Given a list of sinks, find the order the unit generators need to be ran in
+fn schedule(R: *std.ArrayList(UnitGenerator), S: []SoundSink) ![]UnitGenerator {
+    for (S) |s| {
+        resolve(R, s);
+    }
+    return R.items;
+}
+
 /// Oscillators are waveform generators
 pub const Oscillator = union(enum) {
     Noise: osc.Noise,

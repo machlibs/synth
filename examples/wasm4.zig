@@ -66,23 +66,114 @@ pub fn update(app: *App, engine: *mach.Core) !void {
     }
 }
 
+const Command = union(enum) {
+    SetOut: usize,
+    SetIn: usize,
+    RunOsc: usize,
+    RunEnv: usize,
+    Gain: f32,
+    Output: usize,
+};
+
+const Runner = struct {
+    out: usize = 0,
+    in: usize = 0,
+    osc: [4]synth.Oscillator,
+    env: [4]synth.APDHSR,
+    bus: [6][128]f32 = std.mem.zeroes([6][128]f32),
+
+    pub fn run(runner: *Runner, time: usize, sample_rate: usize, program: []const Command) []f32 {
+        // Reset buffer
+        for (runner.bus) |*bus| {
+            for (bus) |*sample| {
+                sample.* = 0;
+            }
+        }
+        // Run program
+        for (program) |command| {
+            switch (command) {
+                .SetOut => |out| runner.out = out,
+                .SetIn => |in| runner.in = in,
+                .RunEnv => |env| {
+                    var i: usize = 0;
+                    while (i < 128) : (i += 1) {
+                        runner.bus[runner.out][i] += runner.bus[runner.in][i] * runner.env[env].sample(time + i);
+                    }
+                },
+                .RunOsc => |osc| {
+                    var i: usize = 0;
+                    while (i < 128) : (i += 1) {
+                        switch (runner.osc[osc]) {
+                            .Noise => |*noise| {
+                                runner.bus[runner.out][i] += runner.bus[runner.in][i] * noise.sample(sample_rate);
+                            },
+                            .Square => |*square| {
+                                runner.bus[runner.out][i] += runner.bus[runner.in][i] * square.sample(sample_rate);
+                            },
+                            .Triangle => |*triangle| {
+                                runner.bus[runner.out][i] += runner.bus[runner.in][i] * triangle.sample(sample_rate);
+                            },
+                        }
+                    }
+                },
+                .Gain => |gain| {
+                    var i: usize = 0;
+                    while (i < 128) : (i += 1) {
+                        runner.bus[runner.out][i] += runner.bus[runner.in][i] * gain;
+                    }
+                },
+                .Output => |bus| {
+                    return &runner.bus[bus];
+                },
+            }
+        }
+        return &runner.bus[runner.out];
+    }
+};
+
 // A simple synthesizer emulating the WASM4 APU.
 pub const ToneEngine = struct {
     /// The time in samples
     time: usize = 0,
-    /// Wasm4 has 4 channels with predefined waveforms
-    channels: [4]synth.Oscillator = .{
-        .{ .Square = .{ .dutyCycle = 0.5 } },
-        .{ .Square = .{ .dutyCycle = 0.5 } },
-        .{ .Triangle = .{} },
-        .{ .Noise = .{ .seed = 0x01 } },
+    program: []const Command = &[_]Command{
+        .{ .SetOut = 0 },
+        .{ .RunOsc = 0 },
+        .{ .SetOut = 1 },
+        .{ .RunOsc = 1 },
+        .{ .SetOut = 2 },
+        .{ .RunOsc = 2 },
+        .{ .SetOut = 3 },
+        .{ .RunOsc = 3 },
+        .{ .SetOut = 4 },
+        .{ .SetIn = 0 },
+        .{ .RunEnv = 0 },
+        .{ .SetIn = 1 },
+        .{ .RunEnv = 1 },
+        .{ .SetIn = 2 },
+        .{ .RunEnv = 2 },
+        .{ .SetIn = 3 },
+        .{ .RunEnv = 3 },
+        .{ .SetOut = 5 },
+        .{ .SetIn = 4 },
+        .{ .Gain = 0.1 },
+        .{ .Output = 5 },
     },
-    /// Envelopes for playing tones
-    envelopes: [4]synth.APDHSR = std.mem.zeroes([4]synth.APDHSR),
+    outbuffer: [128]f32 = [_]f32{0} ** 128,
+    outlen: usize = 0,
+    /// Wasm4 has 4 channels with predefined waveforms
+    runner: Runner = Runner{
+        .osc = .{
+            .{ .Square = .{ .dutyCycle = 0.5 } },
+            .{ .Square = .{ .dutyCycle = 0.5 } },
+            .{ .Triangle = .{} },
+            .{ .Noise = .{ .seed = 0x01 } },
+        },
+        .env = std.mem.zeroes([4]synth.APDHSR),
+    },
+
     /// Controls overall volume
     volume: f32 = 0x1333.0 / 0xFFFF.0,
-    /// Controls
-    volume_triangle: f32 = 0x2000.0 / 0xFFFF.0,
+    // volume_triangle: f32 = 0x2000.0 / 0xFFFF.0,
 
     min_count: usize = std.math.maxInt(usize),
     max_count: usize = 0,
@@ -90,74 +181,70 @@ pub const ToneEngine = struct {
     pub fn render(engine: *ToneEngine, properties: sysaudio.Device.Properties, buffer: []u8) void {
         engine.min_count = @minimum(engine.min_count, buffer.len / properties.channels);
         engine.max_count = @maximum(engine.max_count, buffer.len / properties.channels);
-        switch (properties.format) {
-            .U8 => renderWithType(u8, engine, properties, buffer),
-            .S16 => {
-                const buf = @ptrCast([*]i16, @alignCast(@alignOf(i16), buffer.ptr))[0 .. buffer.len / @sizeOf(i16)];
-                renderWithType(i16, engine, properties, buf);
-            },
-            .S24 => {
-                const buf = @ptrCast([*]i24, @alignCast(@alignOf(i24), buffer.ptr))[0 .. buffer.len / @sizeOf(i24)];
-                renderWithType(i24, engine, properties, buf);
-            },
-            .S32 => {
-                const buf = @ptrCast([*]i32, @alignCast(@alignOf(i32), buffer.ptr))[0 .. buffer.len / @sizeOf(i32)];
-                renderWithType(i32, engine, properties, buf);
-            },
-            .F32 => {
-                const buf = @ptrCast([*]f32, @alignCast(@alignOf(f32), buffer.ptr))[0 .. buffer.len / @sizeOf(f32)];
-                renderWithType(f32, engine, properties, buf);
-            },
-        }
+        // Ignore everything but f32 for now
+        if (properties.format != .F32) return;
+        const buf = @ptrCast([*]f32, @alignCast(@alignOf(f32), buffer.ptr))[0 .. buffer.len / @sizeOf(f32)];
+        renderWithType(f32, engine, properties, buf);
     }
 
     pub fn renderWithType(comptime T: type, engine: *ToneEngine, properties: sysaudio.Device.Properties, buffer: []T) void {
         const frames = buffer.len / properties.channels;
 
         var frame: usize = 0;
-        while (frame < frames) : (frame += 1) {
-            // Render the sample for this frame (e.g. for both left and right audio channels.)
-            var sample: f32 = 0;
-            for (engine.channels) |_, i| {
-                switch (engine.channels[i]) {
-                    .Square => |*square| sample += square.sample(properties.sample_rate) * engine.envelopes[i].sample(engine.time + frame) * engine.volume,
-                    .Triangle => |*triangle| sample += triangle.sample(properties.sample_rate) * engine.envelopes[i].sample(engine.time + frame) * engine.volume_triangle,
-                    .Noise => |*noise| sample += noise.sample(properties.sample_rate) * engine.envelopes[i].sample(engine.time + frame) * engine.volume,
+        if (engine.outlen != 0) {
+            var channel: usize = 0;
+            while (channel < properties.channels) : (channel += 1) {
+                for (engine.outbuffer[0..engine.outlen]) |sample, i| {
+                    var channel_buffer = buffer[channel * frames .. (channel + 1) * frames];
+                    channel_buffer[frame + i] = sample;
                 }
             }
+            engine.outlen = 0;
+        }
 
-            const sample_t: T = sample: {
-                switch (T) {
-                    f32 => break :sample sample,
-                    u8 => break :sample @floatToInt(u8, (sample + 1.0) * 255),
-                    else => break :sample @floatToInt(T, sample * std.math.maxInt(T)),
-                }
-            };
+        const remainder = frames % 128;
+        while (frame < frames) {
+            var samples = engine.runner.run(engine.time + frame, properties.sample_rate, engine.program);
+
+            const send = if (frame + samples.len > frames) remainder else 128;
 
             // Emit the sample on all channels.
             var channel: usize = 0;
             while (channel < properties.channels) : (channel += 1) {
-                var channel_buffer = buffer[channel * frames .. (channel + 1) * frames];
-                channel_buffer[frame] = sample_t;
+                for (samples[0..send]) |sample, i| {
+                    var channel_buffer = buffer[channel * frames .. (channel + 1) * frames];
+                    channel_buffer[frame + i] = sample;
+                }
             }
+            if (send != 128) {
+                for (samples[send..]) |sample, i| {
+                    engine.outbuffer[i] = sample;
+                }
+                engine.outlen = 128 - send;
+            }
+            frame += samples.len;
         }
         engine.time += frames;
     }
 
     pub fn play(engine: *ToneEngine, properties: sysaudio.Device.Properties, channel: usize, frequency: f32) void {
-        switch (engine.channels[channel]) {
-            .Square => |*square| square.frequency = frequency,
-            .Triangle => |*triangle| triangle.frequency = frequency,
-            .Noise => |*noise| noise.frequency = frequency,
-        }
-        const sample_rate = @intToFloat(f32, properties.sample_rate);
-        engine.envelopes[channel].attack = @floatToInt(usize, sample_rate * 0.1);
-        engine.envelopes[channel].peak = 1;
-        engine.envelopes[channel].decay = @floatToInt(usize, sample_rate * 0.1);
-        engine.envelopes[channel].hold = @floatToInt(usize, sample_rate * 0.1);
-        engine.envelopes[channel].sustain = 0.5;
-        engine.envelopes[channel].release = @floatToInt(usize, sample_rate * 0.1);
-        engine.envelopes[channel].start(engine.time);
+        _ = engine;
+        _ = properties;
+        _ = channel;
+        _ = frequency;
+        // switch (engine.channels[channel]) {
+        //     .Square => |*square| square.frequency = frequency,
+        //     .Triangle => |*triangle| triangle.frequency = frequency,
+        //     .Noise => |*noise| noise.frequency = frequency,
+        // }
+        // const sample_rate = @intToFloat(f32, properties.sample_rate);
+        // engine.envelopes[channel].attack = @floatToInt(usize, sample_rate * 0.1);
+        // engine.envelopes[channel].peak = 1;
+        // engine.envelopes[channel].decay = @floatToInt(usize, sample_rate * 0.1);
+        // engine.envelopes[channel].hold = @floatToInt(usize, sample_rate * 0.1);
+        // engine.envelopes[channel].sustain = 0.5;
+        // engine.envelopes[channel].release = @floatToInt(usize, sample_rate * 0.1);
+        // engine.envelopes[channel].start(engine.time);
     }
 
     pub fn keyToFrequency(key: mach.Key) f32 {

@@ -105,13 +105,13 @@ const Runner = struct {
                     while (i < 128) : (i += 1) {
                         switch (runner.osc[osc]) {
                             .Noise => |*noise| {
-                                runner.bus[runner.out][i] += runner.bus[runner.in][i] * noise.sample(sample_rate);
+                                runner.bus[runner.out][i] += noise.sample(sample_rate);
                             },
                             .Square => |*square| {
-                                runner.bus[runner.out][i] += runner.bus[runner.in][i] * square.sample(sample_rate);
+                                runner.bus[runner.out][i] += square.sample(sample_rate);
                             },
                             .Triangle => |*triangle| {
-                                runner.bus[runner.out][i] += runner.bus[runner.in][i] * triangle.sample(sample_rate);
+                                runner.bus[runner.out][i] += triangle.sample(sample_rate);
                             },
                         }
                     }
@@ -156,7 +156,7 @@ pub const ToneEngine = struct {
         .{ .SetOut = 5 },
         .{ .SetIn = 4 },
         .{ .Gain = 0.1 },
-        .{ .Output = 5 },
+        // .{ .Output = 5 },
     },
     outbuffer: [128]f32 = [_]f32{0} ** 128,
     outlen: usize = 0,
@@ -228,23 +228,19 @@ pub const ToneEngine = struct {
     }
 
     pub fn play(engine: *ToneEngine, properties: sysaudio.Device.Properties, channel: usize, frequency: f32) void {
-        _ = engine;
-        _ = properties;
-        _ = channel;
-        _ = frequency;
-        // switch (engine.channels[channel]) {
-        //     .Square => |*square| square.frequency = frequency,
-        //     .Triangle => |*triangle| triangle.frequency = frequency,
-        //     .Noise => |*noise| noise.frequency = frequency,
-        // }
-        // const sample_rate = @intToFloat(f32, properties.sample_rate);
-        // engine.envelopes[channel].attack = @floatToInt(usize, sample_rate * 0.1);
-        // engine.envelopes[channel].peak = 1;
-        // engine.envelopes[channel].decay = @floatToInt(usize, sample_rate * 0.1);
-        // engine.envelopes[channel].hold = @floatToInt(usize, sample_rate * 0.1);
-        // engine.envelopes[channel].sustain = 0.5;
-        // engine.envelopes[channel].release = @floatToInt(usize, sample_rate * 0.1);
-        // engine.envelopes[channel].start(engine.time);
+        switch (engine.runner.osc[channel]) {
+            .Square => |*square| square.frequency = frequency,
+            .Triangle => |*triangle| triangle.frequency = frequency,
+            .Noise => |*noise| noise.frequency = frequency,
+        }
+        const sample_rate = @intToFloat(f32, properties.sample_rate);
+        engine.runner.env[channel].attack = @floatToInt(usize, sample_rate * 0.1);
+        engine.runner.env[channel].peak = 1;
+        engine.runner.env[channel].decay = @floatToInt(usize, sample_rate * 0.1);
+        engine.runner.env[channel].hold = @floatToInt(usize, sample_rate * 0.1);
+        engine.runner.env[channel].sustain = 0.5;
+        engine.runner.env[channel].release = @floatToInt(usize, sample_rate * 0.1);
+        engine.runner.env[channel].start(engine.time);
     }
 
     pub fn keyToFrequency(key: mach.Key) f32 {

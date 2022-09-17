@@ -1,6 +1,6 @@
 const std = @import("std");
-const mach = @import("libs/mach/build.zig");
 const pkg = @import("build.zig").pkg;
+const mach = @import("zig-deps/mach/build.zig");
 
 pub fn build(b: *std.build.Builder) void {
     // Standard release options allow the person running `zig build` to select
@@ -28,6 +28,8 @@ pub fn build(b: *std.build.Builder) void {
 
     const example_run_step = b.step("run-example-wasm4-apu", "Run wasm4-apu example");
     example_run_step.dependOn(example_run_cmd);
+
+    b.getInstallStep().dependOn(example_run_step);
 }
 
 fn thisDir() []const u8 {

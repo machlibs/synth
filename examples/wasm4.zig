@@ -69,17 +69,14 @@ pub fn update(app: *App, engine: *mach.Core) !void {
 const Command = union(enum) {
     SetOut: usize,
     SetIn: usize,
-    RunOsc: usize,
-    RunEnv: usize,
-    Gain: f32,
+    RunUnit: usize,
     Output: usize,
 };
 
 const Runner = struct {
     out: usize = 0,
     in: usize = 0,
-    osc: [4]synth.Oscillator,
-    env: [4]synth.APDHSR,
+    units: [9]Unit,
     bus: [6][128]f32 = std.mem.zeroes([6][128]f32),
 
     pub fn run(runner: *Runner, time: usize, sample_rate: usize, program: []const Command) []f32 {
@@ -94,33 +91,35 @@ const Runner = struct {
             switch (command) {
                 .SetOut => |out| runner.out = out,
                 .SetIn => |in| runner.in = in,
-                .RunEnv => |env| {
-                    var i: usize = 0;
-                    while (i < 128) : (i += 1) {
-                        runner.bus[runner.out][i] += runner.bus[runner.in][i] * runner.env[env].sample(time + i);
-                    }
-                },
-                .RunOsc => |osc| {
-                    var i: usize = 0;
-                    while (i < 128) : (i += 1) {
-                        switch (runner.osc[osc]) {
-                            .Noise => |*noise| {
-                                runner.bus[runner.out][i] += noise.sample(sample_rate);
-                            },
-                            .Square => |*square| {
-                                runner.bus[runner.out][i] += square.sample(sample_rate);
-                            },
-                            .Triangle => |*triangle| {
-                                runner.bus[runner.out][i] += triangle.sample(sample_rate);
-                            },
+                .RunUnit => |unit| switch (runner.units[unit]) {
+                    .Env => |*env| {
+                        var i: usize = 0;
+                        while (i < 128) : (i += 1) {
+                            runner.bus[runner.out][i] += runner.bus[runner.in][i] * env.sample(time + i);
                         }
-                    }
-                },
-                .Gain => |gain| {
-                    var i: usize = 0;
-                    while (i < 128) : (i += 1) {
-                        runner.bus[runner.out][i] += runner.bus[runner.in][i] * gain;
-                    }
+                    },
+                    .Osc => |*osc| {
+                        var i: usize = 0;
+                        while (i < 128) : (i += 1) {
+                            switch (osc.*) {
+                                .Noise => |*noise| {
+                                    runner.bus[runner.out][i] += noise.sample(sample_rate);
+                                },
+                                .Square => |*square| {
+                                    runner.bus[runner.out][i] += square.sample(sample_rate);
+                                },
+                                .Triangle => |*triangle| {
+                                    runner.bus[runner.out][i] += triangle.sample(sample_rate);
+                                },
+                            }
+                        }
+                    },
+                    .Gain => |gain| {
+                        var i: usize = 0;
+                        while (i < 128) : (i += 1) {
+                            runner.bus[runner.out][i] += runner.bus[runner.in][i] * gain;
+                        }
+                    },
                 },
                 .Output => |bus| {
                     return &runner.bus[bus];
@@ -131,44 +130,66 @@ const Runner = struct {
     }
 };
 
+const Unit = union(enum) {
+    Osc: synth.Oscillator,
+    Env: synth.APDHSR,
+    Gain: f32,
+};
+
+const Graph = struct {
+    nodes: []Unit,
+};
+
 // A simple synthesizer emulating the WASM4 APU.
 pub const ToneEngine = struct {
     /// The time in samples
     time: usize = 0,
     program: []const Command = &[_]Command{
         .{ .SetOut = 0 },
-        .{ .RunOsc = 0 },
+        .{ .RunUnit = 0 },
+
         .{ .SetOut = 1 },
-        .{ .RunOsc = 1 },
+        .{ .RunUnit = 1 },
+
         .{ .SetOut = 2 },
-        .{ .RunOsc = 2 },
+        .{ .RunUnit = 2 },
+
         .{ .SetOut = 3 },
-        .{ .RunOsc = 3 },
+        .{ .RunUnit = 3 },
+
         .{ .SetOut = 4 },
         .{ .SetIn = 0 },
-        .{ .RunEnv = 0 },
+        .{ .RunUnit = 4 },
+
         .{ .SetIn = 1 },
-        .{ .RunEnv = 1 },
+        .{ .RunUnit = 5 },
+
         .{ .SetIn = 2 },
-        .{ .RunEnv = 2 },
+        .{ .RunUnit = 6 },
+
         .{ .SetIn = 3 },
-        .{ .RunEnv = 3 },
+        .{ .RunUnit = 7 },
+
         .{ .SetOut = 5 },
         .{ .SetIn = 4 },
-        .{ .Gain = 0.1 },
+        .{ .RunUnit = 8 },
         // .{ .Output = 5 },
     },
     outbuffer: [128]f32 = [_]f32{0} ** 128,
     outlen: usize = 0,
     /// Wasm4 has 4 channels with predefined waveforms
     runner: Runner = Runner{
-        .osc = .{
-            .{ .Square = .{ .dutyCycle = 0.5 } },
-            .{ .Square = .{ .dutyCycle = 0.5 } },
-            .{ .Triangle = .{} },
-            .{ .Noise = .{ .seed = 0x01 } },
+        .units = .{
+            .{ .Osc = .{ .Square = .{ .dutyCycle = 0.5 } } },
+            .{ .Osc = .{ .Square = .{ .dutyCycle = 0.5 } } },
+            .{ .Osc = .{ .Triangle = .{} } },
+            .{ .Osc = .{ .Noise = .{ .seed = 0x01 } } },
+            .{ .Env = std.mem.zeroes(synth.APDHSR) },
+            .{ .Env = std.mem.zeroes(synth.APDHSR) },
+            .{ .Env = std.mem.zeroes(synth.APDHSR) },
+            .{ .Env = std.mem.zeroes(synth.APDHSR) },
+            .{ .Gain = 0.1 },
         },
-        .env = std.mem.zeroes([4]synth.APDHSR),
     },
 
     /// Controls overall volume
@@ -228,19 +249,19 @@ pub const ToneEngine = struct {
     }
 
     pub fn play(engine: *ToneEngine, properties: sysaudio.Device.Properties, channel: usize, frequency: f32) void {
-        switch (engine.runner.osc[channel]) {
+        switch (engine.runner.units[channel].Osc) {
             .Square => |*square| square.frequency = frequency,
             .Triangle => |*triangle| triangle.frequency = frequency,
             .Noise => |*noise| noise.frequency = frequency,
         }
         const sample_rate = @intToFloat(f32, properties.sample_rate);
-        engine.runner.env[channel].attack = @floatToInt(usize, sample_rate * 0.1);
-        engine.runner.env[channel].peak = 1;
-        engine.runner.env[channel].decay = @floatToInt(usize, sample_rate * 0.1);
-        engine.runner.env[channel].hold = @floatToInt(usize, sample_rate * 0.1);
-        engine.runner.env[channel].sustain = 0.5;
-        engine.runner.env[channel].release = @floatToInt(usize, sample_rate * 0.1);
-        engine.runner.env[channel].start(engine.time);
+        engine.runner.units[channel + 4].Env.attack = @floatToInt(usize, sample_rate * 0.1);
+        engine.runner.units[channel + 4].Env.peak = 1;
+        engine.runner.units[channel + 4].Env.decay = @floatToInt(usize, sample_rate * 0.1);
+        engine.runner.units[channel + 4].Env.hold = @floatToInt(usize, sample_rate * 0.1);
+        engine.runner.units[channel + 4].Env.sustain = 0.5;
+        engine.runner.units[channel + 4].Env.release = @floatToInt(usize, sample_rate * 0.1);
+        engine.runner.units[channel + 4].Env.start(engine.time);
     }
 
     pub fn keyToFrequency(key: mach.Key) f32 {

@@ -8,6 +8,12 @@ const Graph = struct {
     block_size: usize,
     allocator: std.mem.Allocator,
     unit_pool: Pool(Unit),
+    connection: std.ArrayList(Connection),
+
+    const Connection = struct {
+        input: *Unit,
+        output: *Unit,
+    };
 
     pub fn init(allocator: std.mem.Allocator, opt: struct {
         sample_rate: usize,
@@ -18,6 +24,7 @@ const Graph = struct {
             .block_size = opt.block_size,
             .allocator = allocator,
             .unit_pool = Pool(Unit).init(allocator),
+            .connection = std.ArrayList(Connection).init(allocator),
         };
     }
 
@@ -32,6 +39,58 @@ const Graph = struct {
         new_unit.sample_rate = graph.sample_rate;
         new_unit.block_size = graph.block_size;
         return new_unit;
+    }
+
+    /// Connect unit_output's output to unit_input's input
+    pub fn connect(graph: *Graph, unit_output: *Unit, unit_input: *Unit) !void {
+        if (unit_input == unit_output) return error.FeedbackLoop;
+        try graph.connection.push(.{ .input = unit_input, .output = unit_output });
+    }
+
+    const ConnectionIter = struct {
+        graph: *Graph,
+        index: usize,
+        unit: *Unit,
+        finding: enum { Inputs, Outputs },
+
+        pub fn next(iter: *ConnectionIter) ?*Unit {
+            switch (iter.finding) {
+                .Inputs => {
+                    while (iter.index < iter.graph.connection.items.len) {
+                        defer iter.index += 1;
+                        if (iter.graph.connections.items[iter.index].output == iter.unit) {
+                            return iter.graph.connections.items[iter.index].input;
+                        }
+                    }
+                },
+                .Outputs => {
+                    while (iter.index < iter.graph.connection.items.len) {
+                        defer iter.index += 1;
+                        if (iter.graph.connections.items[iter.index].input == iter.unit) {
+                            return iter.graph.connections.items[iter.index].output;
+                        }
+                    }
+                },
+            }
+        }
+    };
+
+    pub fn outputIter(graph: *Graph, unit: *Unit) ConnectionIter {
+        return ConnectionIter{
+            .graph = graph,
+            .index = 0,
+            .unit = unit,
+            .finding = .Outputs,
+        };
+    }
+
+    pub fn inputIter(graph: *Graph, unit: *Unit) ConnectionIter {
+        return ConnectionIter{
+            .graph = graph,
+            .index = 0,
+            .unit = unit,
+            .finding = .Inputs,
+        };
     }
 };
 
@@ -68,7 +127,7 @@ const Phasor = struct {
         }
     }
 
-    fn unit() Unit {
+    pub fn unit() Unit {
         var obj = Unit{
             .run = run,
             .data = undefined,
@@ -135,4 +194,20 @@ test "audio graph phasor" {
 
     phasor.run(phasor, time, &input_channels, &output_channels);
     try expectSlicesApproxEqAbs(f32, &expected, output_channels[0], 0.01);
+}
+
+test "audio graph connections" {
+    // Create an audio context
+    var graph = Graph.init(testing.allocator, .{
+        .sample_rate = 10,
+        .block_size = 20,
+    });
+    defer graph.deinit();
+
+    var phasor = try graph.add(Phasor.unit());
+    var output = try graph.add(Unit{});
+
+    try graph.connect(phasor, output);
+
+    try testing.expectEqual(@as(usize, 1), graph.connection.items.len);
 }

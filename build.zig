@@ -26,7 +26,6 @@ pub fn build(b: *std.build.Builder) !void {
     const test_step = b.step("test", "Run library tests");
     test_step.dependOn(&main_tests.step);
 
-    ensureGit(b.allocator);
     fetch.addStep(b, "example-wasm4-apu", "Builds the wasm4-apu example");
     fetch.addStep(b, "run-example-wasm4-apu", "Runs the wasm4-apu example");
     try fetch.fetchAndBuild(b, "zig-deps", &deps, "compile.zig");
@@ -34,24 +33,4 @@ pub fn build(b: *std.build.Builder) !void {
 
 fn thisDir() []const u8 {
     return std.fs.path.dirname(@src().file) orelse ".";
-}
-
-fn ensureGit(allocator: std.mem.Allocator) void {
-    const argv = &[_][]const u8{ "git", "--version" };
-    const result = std.ChildProcess.exec(.{
-        .allocator = allocator,
-        .argv = argv,
-        .cwd = ".",
-    }) catch { // e.g. FileNotFound
-        std.log.err("mach: error: 'git --version' failed. Is git not installed?", .{});
-        std.process.exit(1);
-    };
-    defer {
-        allocator.free(result.stderr);
-        allocator.free(result.stdout);
-    }
-    if (result.term.Exited != 0) {
-        std.log.err("mach: error: 'git --version' failed. Is git not installed?", .{});
-        std.process.exit(1);
-    }
 }

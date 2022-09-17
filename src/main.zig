@@ -3,9 +3,11 @@ const testing = std.testing;
 
 comptime {
     _ = osc;
+    _ = graph;
 }
 
 pub const osc = @import("oscillators.zig");
+pub const graph = @import("graph.zig");
 
 /// Oscillators are waveform generators
 pub const Oscillator = union(enum) {

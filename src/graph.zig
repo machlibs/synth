@@ -30,6 +30,7 @@ const Graph = struct {
 
     pub fn deinit(graph: *Graph) void {
         graph.unit_pool.deinit();
+        graph.connection.deinit();
     }
 
     /// Allocate a unit from the pool
@@ -44,7 +45,7 @@ const Graph = struct {
     /// Connect unit_output's output to unit_input's input
     pub fn connect(graph: *Graph, unit_output: *Unit, unit_input: *Unit) !void {
         if (unit_input == unit_output) return error.FeedbackLoop;
-        try graph.connection.push(.{ .input = unit_input, .output = unit_output });
+        try graph.connection.append(.{ .input = unit_input, .output = unit_output });
     }
 
     const ConnectionIter = struct {
@@ -55,23 +56,24 @@ const Graph = struct {
 
         pub fn next(iter: *ConnectionIter) ?*Unit {
             switch (iter.finding) {
-                .Inputs => {
-                    while (iter.index < iter.graph.connection.items.len) {
-                        defer iter.index += 1;
-                        if (iter.graph.connections.items[iter.index].output == iter.unit) {
-                            return iter.graph.connections.items[iter.index].input;
-                        }
-                    }
-                },
                 .Outputs => {
                     while (iter.index < iter.graph.connection.items.len) {
                         defer iter.index += 1;
-                        if (iter.graph.connections.items[iter.index].input == iter.unit) {
-                            return iter.graph.connections.items[iter.index].output;
+                        if (iter.graph.connection.items[iter.index].output == iter.unit) {
+                            return iter.graph.connection.items[iter.index].input;
+                        }
+                    }
+                },
+                .Inputs => {
+                    while (iter.index < iter.graph.connection.items.len) {
+                        defer iter.index += 1;
+                        if (iter.graph.connection.items[iter.index].input == iter.unit) {
+                            return iter.graph.connection.items[iter.index].output;
                         }
                     }
                 },
             }
+            return null;
         }
     };
 
@@ -110,6 +112,8 @@ pub const Unit = struct {
     }
 };
 
+/// A simple unit that goes from 0 to 1 every period. Useful for implementing
+/// other waves.
 const Phasor = struct {
     frequency: f32 = 1,
     phase: f32 = 0,
@@ -122,7 +126,7 @@ const Phasor = struct {
             self.phase += phase_increase;
             if (self.phase >= 1.0) self.phase = 0;
             for (outputs) |output| {
-                output[i] = self.phase;
+                output[i] += self.phase;
             }
         }
     }
@@ -134,6 +138,30 @@ const Phasor = struct {
         };
         var self = @ptrCast(*Phasor, @alignCast(@alignOf(Phasor), &obj.data));
         self.* = Phasor{};
+        return obj;
+    }
+};
+
+/// Writes samples to out_buffer until it reaches the end.
+const Output = struct {
+    out_buffer: [][]f32,
+
+    pub fn run(obj: *Unit, _: usize, inputs: [][]const f32, _: [][]f32) void {
+        var self = @ptrCast(*Output, @alignCast(@alignOf(Output), &obj.data));
+        for (self.out_buffer) |output, i| {
+            for (output) |*sample, a| {
+                sample.* += inputs[i][a];
+            }
+        }
+    }
+
+    pub fn unit(out_buffer: [][]f32) Unit {
+        var obj = Unit{
+            .run = run,
+            .data = undefined,
+        };
+        var self = @ptrCast(*Output, @alignCast(@alignOf(Output), &obj.data));
+        self.* = Output{ .out_buffer = out_buffer };
         return obj;
     }
 };
@@ -155,8 +183,13 @@ test "audio graph simple phasor" {
 
     phasor.run(phasor, time, &input_channels, &output_channels);
     try testing.expectApproxEqAbs(@as(f32, 0.1), output_channels[0][0], 0.01);
+
+    // The buffer must be zeroed before running again
+    output_block[0] = 0;
     phasor.run(phasor, time, &input_channels, &output_channels);
     try testing.expectApproxEqAbs(@as(f32, 0.2), output_channels[0][0], 0.01);
+
+    output_block[0] = 0;
     phasor.run(phasor, time, &input_channels, &output_channels);
     try testing.expectApproxEqAbs(@as(f32, 0.3), output_channels[0][0], 0.01);
 }
@@ -204,10 +237,18 @@ test "audio graph connections" {
     });
     defer graph.deinit();
 
+    // To create an Output unit we need a buffer to write to
+    var buffer = [_]f32{0} ** 10;
+    var out_buf = buffer[0..10];
+
     var phasor = try graph.add(Phasor.unit());
-    var output = try graph.add(Unit{});
+    var output = try graph.add(Output.unit(&.{out_buf}));
 
     try graph.connect(phasor, output);
 
     try testing.expectEqual(@as(usize, 1), graph.connection.items.len);
+
+    var iter = graph.outputIter(phasor);
+    try testing.expectEqual(@as(?*Unit, output), iter.next());
+    try testing.expectEqual(@as(?*Unit, null), iter.next());
 }

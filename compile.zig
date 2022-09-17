@@ -1,11 +1,6 @@
 const std = @import("std");
 const mach = @import("libs/mach/build.zig");
-
-pub const pkg = std.build.Pkg{
-    .name = "synth",
-    .source = .{ .path = thisDir() ++ "/src/main.zig" },
-    .dependencies = null,
-};
+const pkg = @import("build.zig").pkg;
 
 pub fn build(b: *std.build.Builder) void {
     // Standard release options allow the person running `zig build` to select

@@ -27,6 +27,8 @@ pub fn build(b: *std.build.Builder) !void {
     test_step.dependOn(&main_tests.step);
 
     ensureGit(b.allocator);
+    fetch.addStep(b, "example-wasm4-apu", "Builds the wasm4-apu example");
+    fetch.addStep(b, "run-example-wasm4-apu", "Runs the wasm4-apu example");
     try fetch.fetchAndBuild(b, "zig-deps", &deps, "compile.zig");
 }
 

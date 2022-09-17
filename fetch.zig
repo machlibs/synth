@@ -3,6 +3,25 @@
 
 const std = @import("std");
 
+// adds a step that will be passed through to the build file
+pub fn addStep(
+    builder: *std.build.Builder,
+    name: []const u8,
+    description: []const u8,
+) void {
+    builder.step(name, description).dependOn(builder.getInstallStep());
+}
+
+// adds an option that will be passed through to the build file
+pub fn addOption(
+    builder: *std.build.Builder,
+    comptime T: type,
+    name: []const u8,
+    description: []const u8,
+) void {
+    _ = builder.option(T, name, description);
+}
+
 pub const GitDependency = struct {
     name: []const u8,
     url: []const u8,
@@ -41,6 +60,7 @@ const FetchAndBuild = struct {
     deps: []const Dependency,
     build_file: []const u8,
     write_fetch_cache: bool,
+    run_zig_build: bool,
 
     fn init(
         builder: *std.build.Builder,
@@ -48,6 +68,29 @@ const FetchAndBuild = struct {
         deps: []const Dependency,
         build_file: []const u8,
     ) !*FetchAndBuild {
+        const fetch_skip = builder.option(
+            bool,
+            "fetch-skip",
+            "Skip fetch dependencies",
+        ) orelse false;
+
+        const fetch_only = builder.option(
+            bool,
+            "fetch-only",
+            "Only fetch dependencies",
+        ) orelse false;
+
+        const fetch_force = builder.option(
+            bool,
+            "fetch-force",
+            "Force fetch dependencies",
+        ) orelse false;
+
+        if (fetch_skip and fetch_only) {
+            std.log.err("fetch-skip and fetch-only are mutually exclusive!", .{});
+            return error.InvalidOptions;
+        }
+
         var fetch_and_build = try builder.allocator.create(FetchAndBuild);
         fetch_and_build.* = .{
             .builder = builder,
@@ -55,33 +98,39 @@ const FetchAndBuild = struct {
             .deps = try builder.allocator.dupe(Dependency, deps),
             .build_file = builder.dupe(build_file),
             .write_fetch_cache = false,
+            .run_zig_build = !fetch_only,
         };
 
-        const skip_fetch = builder.option(
-            bool,
-            "fetch-skip",
-            "Skip fetching dependencies",
-        ) orelse false;
-        if (!skip_fetch) {
+        const git_available = checkGitAvailable(builder);
+
+        if (!fetch_skip) {
             const fetch_cache = try readFetchCache(builder);
 
             for (deps) |dep| {
-                if (fetch_cache) |cache| {
-                    var dep_in_cache = false;
-                    for (cache) |cache_dep| {
-                        if (dep.eql(cache_dep)) {
-                            dep_in_cache = true;
-                            break;
+                if (!fetch_force) {
+                    if (fetch_cache) |cache| {
+                        var dep_in_cache = false;
+                        for (cache) |cache_dep| {
+                            if (dep.eql(cache_dep)) {
+                                dep_in_cache = true;
+                                break;
+                            }
                         }
-                    }
-                    if (dep_in_cache) {
-                        continue;
+                        if (dep_in_cache) {
+                            continue;
+                        }
                     }
                 }
 
-                fetch_and_build.step.dependOn(switch (dep) {
-                    .git => |git_dep| &(try GitFetch.init(builder, deps_dir, git_dep)).step,
-                });
+                switch (dep) {
+                    .git => |git_dep| {
+                        if (!git_available) {
+                            return error.GitNotAvailable;
+                        }
+                        const git_fetch = try GitFetch.init(builder, deps_dir, git_dep);
+                        fetch_and_build.step.dependOn(&git_fetch.step);
+                    },
+                }
                 fetch_and_build.write_fetch_cache = true;
             }
         }
@@ -97,27 +146,31 @@ const FetchAndBuild = struct {
             try writeFetchCache(builder, fetch_and_build.deps);
         }
 
-        const args = try std.process.argsAlloc(builder.allocator);
-        defer std.process.argsFree(builder.allocator, args);
+        if (fetch_and_build.run_zig_build) {
+            const args = try std.process.argsAlloc(builder.allocator);
+            defer std.process.argsFree(builder.allocator, args);
 
-        // TODO: this might be platform specific.
-        // on windows, 5 args are prepended before the user defined args
-        const build_args_offset = 5;
+            // TODO: this might be platform specific.
+            // on windows, 5 args are prepended before the user defined args
+            const args_offset = 5;
 
-        var zig_build_args = std.ArrayList([]const u8).init(builder.allocator);
-        defer zig_build_args.deinit();
+            var build_args = std.ArrayList([]const u8).init(builder.allocator);
+            defer build_args.deinit();
 
-        try zig_build_args.appendSlice(
-            &.{ "zig", "build", "--build-file", fetch_and_build.build_file },
-        );
-        for (args[build_args_offset..]) |arg| {
-            if (std.mem.startsWith(u8, arg, "-Dfetch-skip=")) {
-                continue;
+            try build_args.appendSlice(
+                &.{ "zig", "build", "--build-file", fetch_and_build.build_file },
+            );
+            for (args[args_offset..]) |arg| {
+                if (std.mem.startsWith(u8, arg, "-Dfetch-skip=") or
+                    std.mem.startsWith(u8, arg, "-Dfetch-only=") or
+                    std.mem.startsWith(u8, arg, "-Dfetch-force="))
+                {
+                    continue;
+                }
+                try build_args.append(arg);
             }
-            try zig_build_args.append(arg);
+            runChildProcess(builder, builder.build_root, build_args.items, false) catch return;
         }
-
-        try runChildProcess(builder, builder.build_root, zig_build_args.items);
     }
 };
 
@@ -202,19 +255,33 @@ const GitFetch = struct {
 
         std.fs.accessAbsolute(git_fetch.repo_dir, .{}) catch {
             const clone_args = &.{ "git", "clone", git_fetch.dep.url, git_fetch.repo_dir };
-            try runChildProcess(builder, builder.build_root, clone_args);
+            try runChildProcess(builder, builder.build_root, clone_args, false);
         };
 
         const checkout_args = &.{ "git", "checkout", git_fetch.dep.commit };
-        try runChildProcess(builder, git_fetch.repo_dir, checkout_args);
+        try runChildProcess(builder, git_fetch.repo_dir, checkout_args, false);
     }
 };
 
-fn runChildProcess(builder: *std.build.Builder, cwd: []const u8, args: []const []const u8) !void {
+fn checkGitAvailable(builder: *std.build.Builder) bool {
+    const git_version_args = &.{ "git", "--version" };
+    runChildProcess(builder, builder.build_root, git_version_args, true) catch return false;
+    return true;
+}
+
+fn runChildProcess(
+    builder: *std.build.Builder,
+    cwd: []const u8,
+    args: []const []const u8,
+    ignore_stdout: bool,
+) !void {
     var child_process = std.ChildProcess.init(args, builder.allocator);
     child_process.cwd = cwd;
     child_process.env_map = builder.env_map;
     child_process.stdin_behavior = .Ignore;
+    if (ignore_stdout) {
+        child_process.stdout_behavior = .Ignore;
+    }
 
     if (builder.verbose) {
         var command = std.ArrayList(u8).init(builder.allocator);
@@ -231,11 +298,9 @@ fn runChildProcess(builder: *std.build.Builder, cwd: []const u8, args: []const [
 
     switch (try child_process.spawnAndWait()) {
         .Exited => |code| if (code != 0) {
-            std.log.err("Command failed with exit code {}!", .{code});
             return error.RunChildProcessFailed;
         },
-        else => |result| {
-            std.log.err("Command failed with result {}!", .{result});
+        else => {
             return error.RunChildProcessFailed;
         },
     }

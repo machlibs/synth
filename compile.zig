@@ -28,8 +28,6 @@ pub fn build(b: *std.build.Builder) void {
 
     const example_run_step = b.step("run-example-wasm4-apu", "Run wasm4-apu example");
     example_run_step.dependOn(example_run_cmd);
-
-    b.getInstallStep().dependOn(example_run_step);
 }
 
 fn thisDir() []const u8 {

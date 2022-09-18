@@ -4,27 +4,44 @@ const testing = std.testing;
 const Pool = @import("pool.zig").Pool;
 
 const Graph = struct {
+    /// The audio sample_rate
     sample_rate: usize,
+    /// How many audio frames are processed at a time
     block_size: usize,
     allocator: std.mem.Allocator,
+    /// Unit pool
     unit_pool: Pool(Unit),
+    /// Stores how units are connected
     connection: std.ArrayList(Connection),
+    /// Memory used for temporary allocations. Defaults to 4 KiB
+    // scratch_buffer: []u8,
+    /// Scratch allocator
+    // scratch_fba: std.heap.FixedBufferAllocator,
 
     const Connection = struct {
         input: *Unit,
         output: *Unit,
     };
 
-    pub fn init(allocator: std.mem.Allocator, opt: struct {
-        sample_rate: usize,
-        block_size: usize,
-    }) Graph {
+    pub fn init(
+        allocator: std.mem.Allocator,
+        opt: struct {
+            sample_rate: usize,
+            block_size: usize,
+            unit_capacity: usize = 128,
+            connection_capacity: usize = 256,
+            // scratch_buffer_size: usize = 1024 * 4,
+        },
+    ) !Graph {
+        // const scratch_buffer = try allocator.alloc(u8, opt.scratch_buffer_size);
         return Graph{
             .sample_rate = opt.sample_rate,
             .block_size = opt.block_size,
             .allocator = allocator,
-            .unit_pool = Pool(Unit).init(allocator),
-            .connection = std.ArrayList(Connection).init(allocator),
+            .unit_pool = try Pool(Unit).initCapacity(allocator, opt.unit_capacity),
+            .connection = try std.ArrayList(Connection).initCapacity(allocator, opt.connection_capacity),
+            // .scratch_buffer = scratch_buffer,
+            // .scratch_fba = std.heap.FixedBufferAllocator.init(scratch_buffer),
         };
     }
 
@@ -33,9 +50,21 @@ const Graph = struct {
         graph.connection.deinit();
     }
 
-    /// Allocate a unit from the pool
+    /// Allocate a unit from the pool.
+    /// WARNING: This function will allocate if there is no room in the pool. If the code is running in a real-time context, assume
+    /// allocation will cause unacceptable delays.
     pub fn add(graph: *Graph, unit: Unit) !*Unit {
         var new_unit = try graph.unit_pool.new();
+        new_unit.* = unit;
+        new_unit.sample_rate = graph.sample_rate;
+        new_unit.block_size = graph.block_size;
+        return new_unit;
+    }
+
+    /// Allocate a unit from the pool if capacity already exists. If there are no free slots, returns error.OutOfMemory.
+    /// Use this while running in real time contexts.
+    pub fn addFromPool(graph: *Graph, unit: Unit) !*Unit {
+        var new_unit = try graph.unit_pool.newFromPool();
         new_unit.* = unit;
         new_unit.sample_rate = graph.sample_rate;
         new_unit.block_size = graph.block_size;
@@ -48,27 +77,51 @@ const Graph = struct {
         try graph.connection.append(.{ .input = unit_input, .output = unit_output });
     }
 
+    /// Removes a unit and cleans up all the connections
+    pub fn remove(graph: *Graph, unit: *Unit) void {
+        // graph.scratch_fba.reset();
+        // var remove = std.ArrayList(usize).init(graph.scratch_fba.allocator());
+        var connect_iter = graph.connectionIter(unit);
+        while (connect_iter.next()) |_| {
+            _ = graph.connection.swapRemove(connect_iter.index - 1);
+            connect_iter.index -|= 1;
+        }
+        graph.unit_pool.delete(unit);
+    }
+
+    /// Struct for iterating over unit connections
     const ConnectionIter = struct {
         graph: *Graph,
         index: usize,
         unit: *Unit,
-        finding: enum { Inputs, Outputs },
+        finding: enum { Inputs, Outputs, Both },
 
         pub fn next(iter: *ConnectionIter) ?*Unit {
+            const connection = iter.graph.connection;
             switch (iter.finding) {
                 .Outputs => {
-                    while (iter.index < iter.graph.connection.items.len) {
+                    while (iter.index < connection.items.len) {
                         defer iter.index += 1;
-                        if (iter.graph.connection.items[iter.index].output == iter.unit) {
-                            return iter.graph.connection.items[iter.index].input;
+                        if (connection.items[iter.index].output == iter.unit) {
+                            return connection.items[iter.index].input;
                         }
                     }
                 },
                 .Inputs => {
-                    while (iter.index < iter.graph.connection.items.len) {
+                    while (iter.index < connection.items.len) {
                         defer iter.index += 1;
-                        if (iter.graph.connection.items[iter.index].input == iter.unit) {
-                            return iter.graph.connection.items[iter.index].output;
+                        if (connection.items[iter.index].input == iter.unit) {
+                            return connection.items[iter.index].output;
+                        }
+                    }
+                },
+                .Both => {
+                    while (iter.index < connection.items.len) {
+                        defer iter.index += 1;
+                        if (connection.items[iter.index].input == iter.unit or
+                            connection.items[iter.index].output == iter.unit)
+                        {
+                            return connection.items[iter.index].output;
                         }
                     }
                 },
@@ -92,6 +145,15 @@ const Graph = struct {
             .index = 0,
             .unit = unit,
             .finding = .Inputs,
+        };
+    }
+
+    pub fn connectionIter(graph: *Graph, unit: *Unit) ConnectionIter {
+        return ConnectionIter{
+            .graph = graph,
+            .index = 0,
+            .unit = unit,
+            .finding = .Both,
         };
     }
 };
@@ -168,7 +230,7 @@ const Output = struct {
 
 test "audio graph simple phasor" {
     // Create an audio context
-    var graph = Graph.init(testing.allocator, .{
+    var graph = try Graph.init(testing.allocator, .{
         .sample_rate = 10,
         .block_size = 1,
     });
@@ -210,7 +272,7 @@ fn expectSlicesApproxEqAbs(comptime T: type, expected: []T, actual: []T, toleran
 
 test "audio graph phasor" {
     // Create an audio context
-    var graph = Graph.init(testing.allocator, .{
+    var graph = try Graph.init(testing.allocator, .{
         .sample_rate = 10,
         .block_size = 20,
     });
@@ -231,7 +293,7 @@ test "audio graph phasor" {
 
 test "audio graph connections" {
     // Create an audio context
-    var graph = Graph.init(testing.allocator, .{
+    var graph = try Graph.init(testing.allocator, .{
         .sample_rate = 10,
         .block_size = 20,
     });
@@ -251,4 +313,6 @@ test "audio graph connections" {
     var iter = graph.outputIter(phasor);
     try testing.expectEqual(@as(?*Unit, output), iter.next());
     try testing.expectEqual(@as(?*Unit, null), iter.next());
+
+    graph.remove(output);
 }

@@ -25,11 +25,12 @@ const Graph = struct {
     modification_count: usize = 0,
     /// If an invalid configuration is detected, this flag is set and no
     /// processing will be occur until the graph is configured correctly.
-    invalid_graph: bool = false,
+    invalid_graph: bool = false, // TODO: detect errors
     /// Memory used for temporary allocations. Defaults to 4 KiB
     scratch_buffer: []u8,
     /// Scratch allocator
     scratch_fba: std.heap.FixedBufferAllocator,
+    bus_buffer: []f32,
 
     const Connection = struct {
         /// The unit generating a signal
@@ -47,6 +48,7 @@ const Graph = struct {
             connection_capacity: usize = 256,
             max_outputs: usize = 16,
             scratch_buffer_size: usize = 1024 * 4,
+            bus_capacity: usize = 64,
         },
     ) !Graph {
         const scratch_buffer = try allocator.alloc(u8, opt.scratch_buffer_size);
@@ -60,6 +62,7 @@ const Graph = struct {
             .schedule = try std.ArrayList(*Unit).initCapacity(allocator, opt.unit_capacity),
             .scratch_buffer = scratch_buffer,
             .scratch_fba = std.heap.FixedBufferAllocator.init(scratch_buffer),
+            .bus_buffer = try allocator.alloc(f32, opt.block_size * opt.bus_capacity),
         };
     }
 
@@ -69,6 +72,7 @@ const Graph = struct {
         graph.unit_pool.deinit();
         graph.schedule.deinit();
         graph.allocator.free(graph.scratch_buffer);
+        graph.allocator.free(graph.bus_buffer);
     }
 
     /// Allocate a unit from the pool.
@@ -158,6 +162,7 @@ const Graph = struct {
         // Start at the outputs
         for (graph.outputs.items) |out_unit| {
             seen.putAssumeCapacity(out_unit, 1);
+            out_unit.bus_id = graph.schedule.items.len;
             graph.schedule.appendAssumeCapacity(out_unit);
 
             // Add inputs to connection queue
@@ -175,6 +180,7 @@ const Graph = struct {
                 continue;
             }
             seen.putAssumeCapacity(unit.data, 1);
+            unit.data.bus_id = graph.schedule.items.len;
             graph.schedule.appendAssumeCapacity(unit.data);
 
             // Add inputs to connection queue
@@ -189,6 +195,43 @@ const Graph = struct {
         std.mem.reverse(*Unit, graph.schedule.items);
 
         graph.last_scheduled = graph.modification_count;
+    }
+
+    pub fn getBus(graph: *Graph, bus_number: usize) []f32 {
+        const start = bus_number * graph.block_size;
+        const end = start + graph.block_size;
+        return graph.bus_buffer[start..end];
+    }
+
+    /// Execute the graph to generate samples.
+    pub fn run(graph: *Graph, time: usize, input: [][]const f32, output: [][]f32) !void {
+        _ = input;
+        graph.scratch_fba.reset();
+        const allocator = graph.scratch_fba.allocator();
+        var output_buses = try std.ArrayList([]f32).initCapacity(allocator, 16);
+
+        // Reset buffers to 0
+        for (graph.bus_buffer) |*sample| {
+            sample.* = 0.0;
+        }
+
+        for (graph.schedule.items) |unit| {
+            const unit_bus = graph.getBus(unit.bus_id);
+
+            const output_channels = output_channels: {
+                if (unit.is_output) break :output_channels output;
+                var out_iter = graph.outputIter(unit);
+                while (out_iter.next()) |out| {
+                    const output_bus = graph.getBus(out.bus_id);
+                    output_buses.appendAssumeCapacity(output_bus);
+                }
+                break :output_channels output_buses.items;
+            };
+
+            unit.run(unit, time, &.{unit_bus}, output_channels);
+
+            output_buses.shrinkRetainingCapacity(0);
+        }
     }
 
     /// Struct for iterating over unit connections
@@ -265,8 +308,9 @@ pub const Unit = struct {
     is_output: bool = false,
     sample_rate: usize = 0,
     block_size: usize = 0,
+    bus_id: usize = 0,
     /// For the given input, fill output
-    run: *const fn (*Unit, time: usize, input: [][]const f32, output: [][]f32) void,
+    run: *const fn (*Unit, time: usize, bus: [][]const f32, output: [][]f32) void,
     /// Fields to store custom properties in
     data: [16]usize,
 
@@ -306,27 +350,21 @@ const Phasor = struct {
     }
 };
 
-/// Writes samples to out_buffer until it reaches the end.
 const Output = struct {
-    out_buffer: [][]f32,
-
-    pub fn run(obj: *Unit, _: usize, inputs: [][]const f32, _: [][]f32) void {
-        var self = @ptrCast(*Output, @alignCast(@alignOf(Output), &obj.data));
-        for (self.out_buffer) |output, i| {
+    pub fn run(_: *Unit, _: usize, bus: [][]const f32, outputs: [][]f32) void {
+        for (outputs) |output, i| {
             for (output) |*sample, a| {
-                sample.* += inputs[i][a];
+                sample.* += bus[i][a];
             }
         }
     }
 
-    pub fn unit(out_buffer: [][]f32) Unit {
+    pub fn unit() Unit {
         var obj = Unit{
             .run = run,
             .data = undefined,
             .is_output = true,
         };
-        var self = @ptrCast(*Output, @alignCast(@alignOf(Output), &obj.data));
-        self.* = Output{ .out_buffer = out_buffer };
         return obj;
     }
 };
@@ -402,12 +440,8 @@ test "audio graph connect/disconnect" {
     });
     defer graph.deinit();
 
-    // To create an Output unit we need a buffer to write to
-    var buffer = [_]f32{0} ** 10;
-    var out_buf = buffer[0..10];
-
     var phasor = try graph.add(Phasor.unit());
-    var output = try graph.add(Output.unit(&.{out_buf}));
+    var output = try graph.add(Output.unit());
 
     try graph.connect(phasor, output);
 
@@ -431,12 +465,8 @@ test "audio graph removal" {
     });
     defer graph.deinit();
 
-    // To create an Output unit we need a buffer to write to
-    var buffer = [_]f32{0} ** 10;
-    var out_buf = buffer[0..10];
-
     var phasor = try graph.add(Phasor.unit());
-    var output = try graph.add(Output.unit(&.{out_buf}));
+    var output = try graph.add(Output.unit());
 
     try graph.connect(phasor, output);
 
@@ -458,16 +488,40 @@ test "audio graph scheduling" {
     });
     defer graph.deinit();
 
-    // To create an Output unit we need a buffer to write to
-    var buffer = [_]f32{0} ** 10;
-    var out_buf = buffer[0..10];
-
     var phasor = try graph.add(Phasor.unit());
-    var output = try graph.add(Output.unit(&.{out_buf}));
+    var output = try graph.add(Output.unit());
 
     try graph.connect(phasor, output);
 
     try graph.reschedule();
 
     try testing.expectEqualSlices(*Unit, &[_]*Unit{ phasor, output }, graph.schedule.items);
+}
+
+test "audio graph running" {
+    // Create an audio context
+    var graph = try Graph.init(testing.allocator, .{
+        .sample_rate = 10,
+        .block_size = 20,
+    });
+    defer graph.deinit();
+
+    var phasor = try graph.add(Phasor.unit());
+    var output = try graph.add(Output.unit());
+
+    try graph.connect(phasor, output);
+
+    try graph.reschedule();
+
+    try testing.expectEqualSlices(*Unit, &[_]*Unit{ phasor, output }, graph.schedule.items);
+
+    var expected = [10]f32{ 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.0 } ** 2;
+    var input_block = [1]f32{0} ** 20;
+    var output_block = [1]f32{0} ** 20;
+    var input_channels = [1][]f32{&input_block};
+    var output_channels = [1][]f32{&output_block};
+
+    try graph.run(0, &input_channels, &output_channels);
+
+    try expectSlicesApproxEqAbs(f32, &expected, &output_block, 0.01);
 }

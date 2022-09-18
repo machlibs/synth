@@ -1,7 +1,32 @@
 const std = @import("std");
 const testing = std.testing;
+const units = @import("units.zig");
 
 const Pool = @import("pool.zig").Pool;
+const Phasor = units.Phasor;
+const Output = units.Output;
+
+/// An interface for units
+pub const Unit = struct {
+    name: []const u8,
+    is_output: bool = false,
+    sample_rate: usize = 0,
+    block_size: usize = 0,
+    bus_ids: [16]usize = .{0} ** 16, // TODO: figure out long-term plan for multi-channel units
+    inputs: usize = 0,
+    inputs_connected: usize = 0,
+    outputs: usize = 0,
+    outputs_connected: usize = 0,
+    /// For the given inputs, fill the output
+    run: *const fn (*Unit, time: usize, bus: [][]const f32, output: [][]f32) void,
+    /// Fields to store custom properties in
+    data: [16]usize,
+
+    pub fn reset(unit: *Unit) void {
+        unit.is_idempotent = false;
+        unit.is_output = false;
+    }
+};
 
 const Graph = struct {
     /// The audio sample_rate
@@ -259,7 +284,7 @@ const Graph = struct {
             };
 
             unit.run(unit, time, input_channels, output_channels);
-            std.log.warn("{s} bus input ids: {any}", .{ unit.name, unit.bus_ids[0..unit.inputs_connected] });
+            // std.log.warn("{s} bus input ids: {any}", .{ unit.name, unit.bus_ids[0..unit.inputs_connected] });
 
             output_buses.shrinkRetainingCapacity(0);
             input_buses.shrinkRetainingCapacity(0);
@@ -349,83 +374,6 @@ const Graph = struct {
     }
 };
 
-/// An interface for units
-pub const Unit = struct {
-    name: []const u8,
-    is_output: bool = false,
-    sample_rate: usize = 0,
-    block_size: usize = 0,
-    bus_ids: [16]usize = .{0} ** 16, // TODO: figure out long-term plan for multi-channel units
-    inputs: usize = 0,
-    inputs_connected: usize = 0,
-    outputs: usize = 0,
-    outputs_connected: usize = 0,
-    /// For the given inputs, fill the output
-    run: *const fn (*Unit, time: usize, bus: [][]const f32, output: [][]f32) void,
-    /// Fields to store custom properties in
-    data: [16]usize,
-
-    pub fn reset(unit: *Unit) void {
-        unit.is_idempotent = false;
-        unit.is_output = false;
-    }
-};
-
-/// A simple unit that goes from 0 to 1 every period. Useful for implementing
-/// other waves.
-const Phasor = struct {
-    frequency: f32 = 1,
-    phase: f32 = 0,
-
-    pub fn run(obj: *Unit, _: usize, _: [][]const f32, outputs: [][]f32) void {
-        var self = @ptrCast(*Phasor, @alignCast(@alignOf(Phasor), &obj.data));
-        const phase_increase = self.frequency / @intToFloat(f32, obj.sample_rate);
-        var i: usize = 0;
-        while (i < obj.block_size) : (i += 1) {
-            self.phase += phase_increase;
-            if (self.phase >= 1.0) self.phase = 0;
-            for (outputs) |output| {
-                output[i] += self.phase;
-            }
-        }
-    }
-
-    pub fn unit() Unit {
-        var obj = Unit{
-            .name = "Phasor",
-            .run = run,
-            .data = undefined,
-            .inputs = 0,
-            .outputs = 1,
-        };
-        var self = @ptrCast(*Phasor, @alignCast(@alignOf(Phasor), &obj.data));
-        self.* = Phasor{};
-        return obj;
-    }
-};
-
-const Output = struct {
-    pub fn run(_: *Unit, _: usize, bus: [][]const f32, outputs: [][]f32) void {
-        for (outputs) |output, i| {
-            for (output) |*sample, a| {
-                sample.* += bus[i][a];
-            }
-        }
-    }
-
-    pub fn unit() Unit {
-        var obj = Unit{
-            .name = "Output",
-            .run = run,
-            .data = undefined,
-            .is_output = true,
-            .inputs = 16,
-            .outputs = 0,
-        };
-        return obj;
-    }
-};
-
 test "audio graph simple phasor" {
     // Create an audio context
     var graph = try Graph.init(testing.allocator, .{
@@ -443,11 +391,13 @@ test "audio graph simple phasor" {
 
     phasor.run(phasor, time, &input_channels, &output_channels);
     try testing.expectApproxEqAbs(@as(f32, 0.1), output_channels[0][0], 0.01);
+    time += 1;
 
     // The buffer must be zeroed before running again
     output_block[0] = 0;
     phasor.run(phasor, time, &input_channels, &output_channels);
     try testing.expectApproxEqAbs(@as(f32, 0.2), output_channels[0][0], 0.01);
+    time += 1;
 
     output_block[0] = 0;
     phasor.run(phasor, time, &input_channels, &output_channels);

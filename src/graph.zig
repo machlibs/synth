@@ -37,6 +37,8 @@ const Graph = struct {
         input: *Unit,
         /// The unit reading the signal
         output: *Unit,
+        /// Which channels are connected
+        channel: usize,
     };
 
     pub fn init(
@@ -112,17 +114,17 @@ const Graph = struct {
     }
 
     /// Connect unit_output's output to unit_input's input
-    pub fn connect(graph: *Graph, unit_output: *Unit, unit_input: *Unit) !void {
+    pub fn connect(graph: *Graph, unit_output: *Unit, unit_input: *Unit, channel: usize) !void {
         if (unit_input == unit_output) return error.FeedbackLoop;
-        try graph.connection.append(.{ .input = unit_input, .output = unit_output });
+        try graph.connection.append(.{ .input = unit_input, .output = unit_output, .channel = channel });
         graph.modification_count +%= 1;
     }
 
     /// Disconnect unit_output's output from unit_input's input
-    pub fn disconnect(graph: *Graph, unit_output: *Unit, unit_input: *Unit) void {
+    pub fn disconnect(graph: *Graph, unit_output: *Unit, unit_input: *Unit, channel: usize) void {
         if (unit_input == unit_output) return;
         for (graph.connection.items) |item, i| {
-            if (item.output == unit_output and item.input == unit_input) {
+            if (item.output == unit_output and item.input == unit_input and item.channel == channel) {
                 _ = graph.connection.swapRemove(i);
                 graph.modification_count +%= 1;
                 return;
@@ -152,17 +154,20 @@ const Graph = struct {
         if (graph.last_scheduled == graph.modification_count) return;
 
         // Create a hash map to store what items have already been seen
-        var seen = std.AutoHashMap(*Unit, usize).init(allocator);
+        var seen = std.AutoHashMap(Channel, usize).init(allocator);
         // Ensure capacity to minimize heap fragmentation
         try seen.ensureTotalCapacity(@intCast(u32, graph.unit_count));
         // Create a queue for adding search items to
-        const ConnectionQueue = std.TailQueue(*Unit);
+        const ConnectionQueue = std.TailQueue(Channel);
         var connection_queue = ConnectionQueue{};
+
+        var bus_count: usize = 0;
 
         // Start at the outputs
         for (graph.outputs.items) |out_unit| {
-            seen.putAssumeCapacity(out_unit, 1);
-            out_unit.bus_id = graph.schedule.items.len;
+            // seen.putAssumeCapacity(out_unit, 1);
+            // out_unit.bus_ids[0] = bus_count;
+            // bus_count += 1;
             graph.schedule.appendAssumeCapacity(out_unit);
 
             // Add inputs to connection queue
@@ -180,11 +185,12 @@ const Graph = struct {
                 continue;
             }
             seen.putAssumeCapacity(unit.data, 1);
-            unit.data.bus_id = graph.schedule.items.len;
-            graph.schedule.appendAssumeCapacity(unit.data);
+            unit.data.unit.bus_ids[unit.data.channel] = bus_count;
+            bus_count += 1;
+            graph.schedule.appendAssumeCapacity(unit.data.unit);
 
             // Add inputs to connection queue
-            var iter = graph.inputIter(unit.data);
+            var iter = graph.inputIter(unit.data.unit);
             while (iter.next()) |input| {
                 var next = try allocator.create(ConnectionQueue.Node);
                 next.data = input;
@@ -209,6 +215,7 @@ const Graph = struct {
         graph.scratch_fba.reset();
         const allocator = graph.scratch_fba.allocator();
         var output_buses = try std.ArrayList([]f32).initCapacity(allocator, 16);
+        var input_buses = try std.ArrayList([]f32).initCapacity(allocator, 16);
 
         // Reset buffers to 0
         for (graph.bus_buffer) |*sample| {
@@ -216,23 +223,33 @@ const Graph = struct {
         }
 
         for (graph.schedule.items) |unit| {
-            const unit_bus = graph.getBus(unit.bus_id);
+            const input_channels = input_channels: {
+                var i: usize = 0;
+                while (i < unit.inputs) : (i += 1) {
+                    const unit_bus = graph.getBus(unit.bus_ids[i]);
+                    input_buses.appendAssumeCapacity(unit_bus);
+                }
+                break :input_channels input_buses.items;
+            };
 
             const output_channels = output_channels: {
                 if (unit.is_output) break :output_channels output;
                 var out_iter = graph.outputIter(unit);
                 while (out_iter.next()) |out| {
-                    const output_bus = graph.getBus(out.bus_id);
+                    const output_bus = graph.getBus(out.unit.bus_ids[out.channel]);
                     output_buses.appendAssumeCapacity(output_bus);
                 }
                 break :output_channels output_buses.items;
             };
 
-            unit.run(unit, time, &.{unit_bus}, output_channels);
+            unit.run(unit, time, input_channels, output_channels);
 
             output_buses.shrinkRetainingCapacity(0);
+            input_buses.shrinkRetainingCapacity(0);
         }
     }
+
+    const Channel = struct { unit: *Unit, channel: usize };
 
     /// Struct for iterating over unit connections
     const ConnectionIter = struct {
@@ -241,14 +258,17 @@ const Graph = struct {
         unit: *Unit,
         finding: enum { Inputs, Outputs, Both },
 
-        pub fn next(iter: *ConnectionIter) ?*Unit {
+        pub fn next(iter: *ConnectionIter) ?Channel {
             const connection = iter.graph.connection;
             switch (iter.finding) {
                 .Outputs => {
                     while (iter.index < connection.items.len) {
                         defer iter.index += 1;
                         if (connection.items[iter.index].output == iter.unit) {
-                            return connection.items[iter.index].input;
+                            return .{
+                                .unit = connection.items[iter.index].input,
+                                .channel = connection.items[iter.index].channel,
+                            };
                         }
                     }
                 },
@@ -256,17 +276,26 @@ const Graph = struct {
                     while (iter.index < connection.items.len) {
                         defer iter.index += 1;
                         if (connection.items[iter.index].input == iter.unit) {
-                            return connection.items[iter.index].output;
+                            return .{
+                                .unit = connection.items[iter.index].output,
+                                .channel = connection.items[iter.index].channel,
+                            };
                         }
                     }
                 },
                 .Both => {
                     while (iter.index < connection.items.len) {
                         defer iter.index += 1;
-                        if (connection.items[iter.index].input == iter.unit or
-                            connection.items[iter.index].output == iter.unit)
-                        {
-                            return connection.items[iter.index].output;
+                        if (connection.items[iter.index].input == iter.unit) {
+                            return .{
+                                .unit = connection.items[iter.index].output,
+                                .channel = connection.items[iter.index].channel,
+                            };
+                        } else if (connection.items[iter.index].output == iter.unit) {
+                            return .{
+                                .unit = connection.items[iter.index].input,
+                                .channel = connection.items[iter.index].channel,
+                            };
                         }
                     }
                 },
@@ -308,8 +337,10 @@ pub const Unit = struct {
     is_output: bool = false,
     sample_rate: usize = 0,
     block_size: usize = 0,
-    bus_id: usize = 0,
-    /// For the given input, fill output
+    bus_ids: [16]usize = .{0} ** 16, // TODO: figure out long-term plan for multi-channel units
+    inputs: usize = 0,
+    outputs: usize = 0,
+    /// For the given inputs, fill the output
     run: *const fn (*Unit, time: usize, bus: [][]const f32, output: [][]f32) void,
     /// Fields to store custom properties in
     data: [16]usize,
@@ -343,6 +374,8 @@ const Phasor = struct {
         var obj = Unit{
             .run = run,
             .data = undefined,
+            .inputs = 0,
+            .outputs = 1,
         };
         var self = @ptrCast(*Phasor, @alignCast(@alignOf(Phasor), &obj.data));
         self.* = Phasor{};
@@ -364,6 +397,8 @@ const Output = struct {
             .run = run,
             .data = undefined,
             .is_output = true,
+            .inputs = 16,
+            .outputs = 0,
         };
         return obj;
     }
@@ -443,18 +478,18 @@ test "audio graph connect/disconnect" {
     var phasor = try graph.add(Phasor.unit());
     var output = try graph.add(Output.unit());
 
-    try graph.connect(phasor, output);
+    try graph.connect(phasor, output, 0);
 
     try testing.expectEqual(@as(usize, 1), graph.connection.items.len);
 
     var iter = graph.outputIter(phasor);
-    try testing.expectEqual(@as(?*Unit, output), iter.next());
-    try testing.expectEqual(@as(?*Unit, null), iter.next());
+    try testing.expectEqual(@as(?Graph.Channel, .{ .unit = output, .channel = 0 }), iter.next());
+    try testing.expectEqual(@as(?Graph.Channel, null), iter.next());
 
-    graph.disconnect(phasor, output);
+    graph.disconnect(phasor, output, 0);
 
     iter = graph.outputIter(phasor);
-    try testing.expectEqual(@as(?*Unit, null), iter.next());
+    try testing.expectEqual(@as(?Graph.Channel, null), iter.next());
 }
 
 test "audio graph removal" {
@@ -468,7 +503,7 @@ test "audio graph removal" {
     var phasor = try graph.add(Phasor.unit());
     var output = try graph.add(Output.unit());
 
-    try graph.connect(phasor, output);
+    try graph.connect(phasor, output, 0);
 
     try testing.expectEqual(@as(usize, 1), graph.connection.items.len);
 
@@ -477,7 +512,7 @@ test "audio graph removal" {
     try testing.expectEqual(@as(usize, 0), graph.connection.items.len);
 
     var iter = graph.outputIter(phasor);
-    try testing.expectEqual(@as(?*Unit, null), iter.next());
+    try testing.expectEqual(@as(?Graph.Channel, null), iter.next());
 }
 
 test "audio graph scheduling" {
@@ -491,7 +526,7 @@ test "audio graph scheduling" {
     var phasor = try graph.add(Phasor.unit());
     var output = try graph.add(Output.unit());
 
-    try graph.connect(phasor, output);
+    try graph.connect(phasor, output, 0);
 
     try graph.reschedule();
 
@@ -509,7 +544,7 @@ test "audio graph running" {
     var phasor = try graph.add(Phasor.unit());
     var output = try graph.add(Output.unit());
 
-    try graph.connect(phasor, output);
+    try graph.connect(phasor, output, 0);
 
     try graph.reschedule();
 

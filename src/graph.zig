@@ -11,15 +11,30 @@ const Graph = struct {
     allocator: std.mem.Allocator,
     /// Unit pool
     unit_pool: Pool(Unit),
+    /// How many units are allocated
+    unit_count: usize = 0,
     /// Stores how units are connected
     connection: std.ArrayList(Connection),
+    /// Stores all output units, used for determining the schedule
+    outputs: std.ArrayList(*Unit),
+    /// Schedule for running units
+    schedule: std.ArrayList(*Unit),
+    /// Last time the graph ran the scheduling algorithm, in terms of modification count
+    last_scheduled: usize = 0,
+    /// The number of modifications to the graph
+    modification_count: usize = 0,
+    /// If an invalid configuration is detected, this flag is set and no
+    /// processing will be occur until the graph is configured correctly.
+    invalid_graph: bool = false,
     /// Memory used for temporary allocations. Defaults to 4 KiB
-    // scratch_buffer: []u8,
+    scratch_buffer: []u8,
     /// Scratch allocator
-    // scratch_fba: std.heap.FixedBufferAllocator,
+    scratch_fba: std.heap.FixedBufferAllocator,
 
     const Connection = struct {
+        /// The unit generating a signal
         input: *Unit,
+        /// The unit reading the signal
         output: *Unit,
     };
 
@@ -27,27 +42,33 @@ const Graph = struct {
         allocator: std.mem.Allocator,
         opt: struct {
             sample_rate: usize,
-            block_size: usize,
+            block_size: usize = 128,
             unit_capacity: usize = 128,
             connection_capacity: usize = 256,
-            // scratch_buffer_size: usize = 1024 * 4,
+            max_outputs: usize = 16,
+            scratch_buffer_size: usize = 1024 * 4,
         },
     ) !Graph {
-        // const scratch_buffer = try allocator.alloc(u8, opt.scratch_buffer_size);
+        const scratch_buffer = try allocator.alloc(u8, opt.scratch_buffer_size);
         return Graph{
             .sample_rate = opt.sample_rate,
             .block_size = opt.block_size,
             .allocator = allocator,
             .unit_pool = try Pool(Unit).initCapacity(allocator, opt.unit_capacity),
             .connection = try std.ArrayList(Connection).initCapacity(allocator, opt.connection_capacity),
-            // .scratch_buffer = scratch_buffer,
-            // .scratch_fba = std.heap.FixedBufferAllocator.init(scratch_buffer),
+            .outputs = try std.ArrayList(*Unit).initCapacity(allocator, opt.max_outputs),
+            .schedule = try std.ArrayList(*Unit).initCapacity(allocator, opt.unit_capacity),
+            .scratch_buffer = scratch_buffer,
+            .scratch_fba = std.heap.FixedBufferAllocator.init(scratch_buffer),
         };
     }
 
     pub fn deinit(graph: *Graph) void {
-        graph.unit_pool.deinit();
         graph.connection.deinit();
+        graph.outputs.deinit();
+        graph.unit_pool.deinit();
+        graph.schedule.deinit();
+        graph.allocator.free(graph.scratch_buffer);
     }
 
     /// Allocate a unit from the pool.
@@ -58,6 +79,14 @@ const Graph = struct {
         new_unit.* = unit;
         new_unit.sample_rate = graph.sample_rate;
         new_unit.block_size = graph.block_size;
+
+        graph.modification_count +%= 1;
+        graph.unit_count += 1;
+        if (new_unit.is_output and graph.outputs.items.len < graph.outputs.capacity) {
+            // TODO: Consider finding all outputs every time a modification occurs?
+            graph.outputs.appendAssumeCapacity(new_unit);
+        }
+
         return new_unit;
     }
 
@@ -68,6 +97,13 @@ const Graph = struct {
         new_unit.* = unit;
         new_unit.sample_rate = graph.sample_rate;
         new_unit.block_size = graph.block_size;
+
+        graph.modification_count +%= 1;
+        graph.unit_count += 1;
+        if (new_unit.is_output and graph.outputs.items.len < graph.outputs.capacity) {
+            graph.outputs.appendAssumeCapacity(new_unit);
+        }
+
         return new_unit;
     }
 
@@ -75,18 +111,84 @@ const Graph = struct {
     pub fn connect(graph: *Graph, unit_output: *Unit, unit_input: *Unit) !void {
         if (unit_input == unit_output) return error.FeedbackLoop;
         try graph.connection.append(.{ .input = unit_input, .output = unit_output });
+        graph.modification_count +%= 1;
+    }
+
+    /// Disconnect unit_output's output from unit_input's input
+    pub fn disconnect(graph: *Graph, unit_output: *Unit, unit_input: *Unit) void {
+        if (unit_input == unit_output) return;
+        for (graph.connection.items) |item, i| {
+            if (item.output == unit_output and item.input == unit_input) {
+                _ = graph.connection.swapRemove(i);
+                graph.modification_count +%= 1;
+                return;
+            }
+        }
     }
 
     /// Removes a unit and cleans up all the connections
     pub fn remove(graph: *Graph, unit: *Unit) void {
-        // graph.scratch_fba.reset();
-        // var remove = std.ArrayList(usize).init(graph.scratch_fba.allocator());
         var connect_iter = graph.connectionIter(unit);
         while (connect_iter.next()) |_| {
             _ = graph.connection.swapRemove(connect_iter.index - 1);
             connect_iter.index -|= 1;
         }
         graph.unit_pool.delete(unit);
+        graph.modification_count +%= 1;
+        graph.unit_count -|= 1;
+    }
+
+    /// If the graph has been modified, generate a new schedule for the units
+    pub fn reschedule(graph: *Graph) !void {
+        graph.scratch_fba.reset();
+        graph.schedule.shrinkRetainingCapacity(0);
+        const allocator = graph.scratch_fba.allocator();
+
+        // Skip rescheduling if the graph has not been modified
+        if (graph.last_scheduled == graph.modification_count) return;
+
+        // Create a hash map to store what items have already been seen
+        var seen = std.AutoHashMap(*Unit, usize).init(allocator);
+        // Ensure capacity to minimize heap fragmentation
+        try seen.ensureTotalCapacity(@intCast(u32, graph.unit_count));
+        // Create a queue for adding search items to
+        const ConnectionQueue = std.TailQueue(*Unit);
+        var connection_queue = ConnectionQueue{};
+
+        // Start at the outputs
+        for (graph.outputs.items) |out_unit| {
+            seen.putAssumeCapacity(out_unit, 1);
+            graph.schedule.appendAssumeCapacity(out_unit);
+
+            // Add inputs to connection queue
+            var iter = graph.inputIter(out_unit);
+            while (iter.next()) |input| {
+                var next = try allocator.create(ConnectionQueue.Node);
+                next.data = input;
+                connection_queue.append(next);
+            }
+        }
+
+        // Perform a breadth first search
+        while (connection_queue.pop()) |unit| {
+            if (seen.get(unit.data)) |_| {
+                continue;
+            }
+            seen.putAssumeCapacity(unit.data, 1);
+            graph.schedule.appendAssumeCapacity(unit.data);
+
+            // Add inputs to connection queue
+            var iter = graph.inputIter(unit.data);
+            while (iter.next()) |input| {
+                var next = try allocator.create(ConnectionQueue.Node);
+                next.data = input;
+                connection_queue.append(next);
+            }
+        }
+
+        std.mem.reverse(*Unit, graph.schedule.items);
+
+        graph.last_scheduled = graph.modification_count;
     }
 
     /// Struct for iterating over unit connections
@@ -221,6 +323,7 @@ const Output = struct {
         var obj = Unit{
             .run = run,
             .data = undefined,
+            .is_output = true,
         };
         var self = @ptrCast(*Output, @alignCast(@alignOf(Output), &obj.data));
         self.* = Output{ .out_buffer = out_buffer };
@@ -291,7 +394,7 @@ test "audio graph phasor" {
     try expectSlicesApproxEqAbs(f32, &expected, output_channels[0], 0.01);
 }
 
-test "audio graph connections" {
+test "audio graph connect/disconnect" {
     // Create an audio context
     var graph = try Graph.init(testing.allocator, .{
         .sample_rate = 10,
@@ -314,5 +417,57 @@ test "audio graph connections" {
     try testing.expectEqual(@as(?*Unit, output), iter.next());
     try testing.expectEqual(@as(?*Unit, null), iter.next());
 
+    graph.disconnect(phasor, output);
+
+    iter = graph.outputIter(phasor);
+    try testing.expectEqual(@as(?*Unit, null), iter.next());
+}
+
+test "audio graph removal" {
+    // Create an audio context
+    var graph = try Graph.init(testing.allocator, .{
+        .sample_rate = 10,
+        .block_size = 20,
+    });
+    defer graph.deinit();
+
+    // To create an Output unit we need a buffer to write to
+    var buffer = [_]f32{0} ** 10;
+    var out_buf = buffer[0..10];
+
+    var phasor = try graph.add(Phasor.unit());
+    var output = try graph.add(Output.unit(&.{out_buf}));
+
+    try graph.connect(phasor, output);
+
+    try testing.expectEqual(@as(usize, 1), graph.connection.items.len);
+
     graph.remove(output);
+
+    try testing.expectEqual(@as(usize, 0), graph.connection.items.len);
+
+    var iter = graph.outputIter(phasor);
+    try testing.expectEqual(@as(?*Unit, null), iter.next());
+}
+
+test "audio graph scheduling" {
+    // Create an audio context
+    var graph = try Graph.init(testing.allocator, .{
+        .sample_rate = 10,
+        .block_size = 20,
+    });
+    defer graph.deinit();
+
+    // To create an Output unit we need a buffer to write to
+    var buffer = [_]f32{0} ** 10;
+    var out_buf = buffer[0..10];
+
+    var phasor = try graph.add(Phasor.unit());
+    var output = try graph.add(Output.unit(&.{out_buf}));
+
+    try graph.connect(phasor, output);
+
+    try graph.reschedule();
+
+    try testing.expectEqualSlices(*Unit, &[_]*Unit{ phasor, output }, graph.schedule.items);
 }

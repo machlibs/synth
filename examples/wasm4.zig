@@ -82,10 +82,12 @@ pub const ToneEngine = struct {
     osc_units: [4]*Unit,
     env_units: [4]*Unit,
     output_unit: *Unit,
+    gain_unit: *Unit,
+    triangle_gain_unit: *Unit,
 
     /// Controls overall volume
     volume: f32 = 0x1333.0 / 0xFFFF.0,
-    // volume_triangle: f32 = 0x2000.0 / 0xFFFF.0,
+    volume_triangle: f32 = 0x2000.0 / 0xFFFF.0,
 
     min_count: usize = std.math.maxInt(usize),
     max_count: usize = 0,
@@ -98,6 +100,8 @@ pub const ToneEngine = struct {
             .osc_units = undefined,
             .env_units = undefined,
             .output_unit = undefined,
+            .gain_unit = undefined,
+            .triangle_gain_unit = undefined,
         };
 
         // Create unit generators
@@ -114,6 +118,8 @@ pub const ToneEngine = struct {
             try engine.graph.add(synth.env.APDHSR.unit()),
         };
         engine.output_unit = try engine.graph.add(synth.units.Output.unit());
+        engine.gain_unit = try engine.graph.add(synth.units.Gain.unit(engine.volume));
+        engine.triangle_gain_unit = try engine.graph.add(synth.units.Gain.unit(engine.volume_triangle));
 
         // Connect unit generators
         try engine.graph.connect(engine.osc_units[0], engine.env_units[0], 0);
@@ -121,10 +127,13 @@ pub const ToneEngine = struct {
         try engine.graph.connect(engine.osc_units[2], engine.env_units[2], 0);
         try engine.graph.connect(engine.osc_units[3], engine.env_units[3], 0);
 
-        try engine.graph.connect(engine.env_units[0], engine.output_unit, 0);
-        try engine.graph.connect(engine.env_units[1], engine.output_unit, 0);
-        try engine.graph.connect(engine.env_units[2], engine.output_unit, 0);
-        try engine.graph.connect(engine.env_units[3], engine.output_unit, 0);
+        try engine.graph.connect(engine.env_units[0], engine.gain_unit, 0);
+        try engine.graph.connect(engine.env_units[1], engine.gain_unit, 0);
+        try engine.graph.connect(engine.env_units[2], engine.triangle_gain_unit, 0);
+        try engine.graph.connect(engine.env_units[3], engine.gain_unit, 0);
+
+        try engine.graph.connect(engine.gain_unit, engine.output_unit, 0);
+        try engine.graph.connect(engine.triangle_gain_unit, engine.output_unit, 0);
 
         // TODO: multiple channels
 

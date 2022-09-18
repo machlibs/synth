@@ -64,3 +64,29 @@ pub const Output = struct {
         return obj;
     }
 };
+
+pub const Gain = struct {
+    level: f32,
+
+    pub fn run(obj: *Unit, _: usize, bus: [][]const f32, outputs: [][]f32) void {
+        var self = @ptrCast(*Gain, @alignCast(@alignOf(Gain), &obj.data));
+        for (outputs) |output, i| {
+            for (output) |*sample, a| {
+                sample.* += self.level * bus[i][a];
+            }
+        }
+    }
+
+    pub fn unit(level: f32) Unit {
+        var obj = Unit{
+            .name = "Gain",
+            .run = run,
+            .data = undefined,
+            .inputs = 16,
+            .outputs = 0,
+        };
+        var self = @ptrCast(*Gain, @alignCast(@alignOf(Gain), &obj.data));
+        self.* = Gain{ .level = level };
+        return obj;
+    }
+};

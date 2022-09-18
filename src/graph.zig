@@ -117,6 +117,8 @@ const Graph = struct {
     pub fn connect(graph: *Graph, unit_output: *Unit, unit_input: *Unit, channel: usize) !void {
         if (unit_input == unit_output) return error.FeedbackLoop;
         try graph.connection.append(.{ .input = unit_input, .output = unit_output, .channel = channel });
+        unit_input.inputs_connected += 1;
+        unit_output.outputs_connected += 1;
         graph.modification_count +%= 1;
     }
 
@@ -126,6 +128,8 @@ const Graph = struct {
         for (graph.connection.items) |item, i| {
             if (item.output == unit_output and item.input == unit_input and item.channel == channel) {
                 _ = graph.connection.swapRemove(i);
+                unit_input.inputs_connected -= 1;
+                unit_output.outputs_connected -= 1;
                 graph.modification_count +%= 1;
                 return;
             }
@@ -154,7 +158,7 @@ const Graph = struct {
         if (graph.last_scheduled == graph.modification_count) return;
 
         // Create a hash map to store what items have already been seen
-        var seen = std.AutoHashMap(Channel, usize).init(allocator);
+        var seen = std.AutoHashMap(*Unit, [16]bool).init(allocator);
         // Ensure capacity to minimize heap fragmentation
         try seen.ensureTotalCapacity(@intCast(u32, graph.unit_count));
         // Create a queue for adding search items to
@@ -165,9 +169,18 @@ const Graph = struct {
 
         // Start at the outputs
         for (graph.outputs.items) |out_unit| {
-            // seen.putAssumeCapacity(out_unit, 1);
-            // out_unit.bus_ids[0] = bus_count;
-            // bus_count += 1;
+            var seen_res = seen.getOrPutAssumeCapacity(out_unit);
+            if (!seen_res.found_existing) {
+                seen_res.value_ptr.* = [_]bool{false} ** 16;
+                var i: usize = 0;
+                while (i < out_unit.inputs_connected) : (i += 1) {
+                    var next = try allocator.create(ConnectionQueue.Node);
+                    next.data = .{ .unit = out_unit, .channel = i };
+                    connection_queue.append(next);
+                }
+            } else {
+                std.log.warn("duplicate output", .{});
+            }
             graph.schedule.appendAssumeCapacity(out_unit);
 
             // Add inputs to connection queue
@@ -181,13 +194,16 @@ const Graph = struct {
 
         // Perform a breadth first search
         while (connection_queue.pop()) |unit| {
-            if (seen.get(unit.data)) |_| {
+            var seen_res = seen.getOrPutAssumeCapacity(unit.data.unit);
+            if (seen_res.found_existing and seen_res.value_ptr.*[unit.data.channel]) {
                 continue;
+            } else if (!seen_res.found_existing) {
+                seen_res.value_ptr.* = [_]bool{false} ** 16;
+                graph.schedule.appendAssumeCapacity(unit.data.unit);
             }
-            seen.putAssumeCapacity(unit.data, 1);
+            seen_res.value_ptr.*[unit.data.channel] = true;
             unit.data.unit.bus_ids[unit.data.channel] = bus_count;
             bus_count += 1;
-            graph.schedule.appendAssumeCapacity(unit.data.unit);
 
             // Add inputs to connection queue
             var iter = graph.inputIter(unit.data.unit);
@@ -225,7 +241,7 @@ const Graph = struct {
         for (graph.schedule.items) |unit| {
             const input_channels = input_channels: {
                 var i: usize = 0;
-                while (i < unit.inputs) : (i += 1) {
+                while (i < unit.inputs_connected) : (i += 1) {
                     const unit_bus = graph.getBus(unit.bus_ids[i]);
                     input_buses.appendAssumeCapacity(unit_bus);
                 }
@@ -243,6 +259,7 @@ const Graph = struct {
             };
 
             unit.run(unit, time, input_channels, output_channels);
+            std.log.warn("{s} bus input ids: {any}", .{ unit.name, unit.bus_ids[0..unit.inputs_connected] });
 
             output_buses.shrinkRetainingCapacity(0);
             input_buses.shrinkRetainingCapacity(0);
@@ -334,12 +351,15 @@ const Graph = struct {
 
 /// An interface for units
 pub const Unit = struct {
+    name: []const u8,
     is_output: bool = false,
     sample_rate: usize = 0,
     block_size: usize = 0,
     bus_ids: [16]usize = .{0} ** 16, // TODO: figure out long-term plan for multi-channel units
     inputs: usize = 0,
+    inputs_connected: usize = 0,
     outputs: usize = 0,
+    outputs_connected: usize = 0,
     /// For the given inputs, fill the output
     run: *const fn (*Unit, time: usize, bus: [][]const f32, output: [][]f32) void,
     /// Fields to store custom properties in
@@ -372,6 +392,7 @@ const Phasor = struct {
 
     pub fn unit() Unit {
         var obj = Unit{
+            .name = "Phasor",
             .run = run,
             .data = undefined,
             .inputs = 0,
@@ -394,6 +415,7 @@ const Output = struct {
 
     pub fn unit() Unit {
         var obj = Unit{
+            .name = "Output",
             .run = run,
             .data = undefined,
             .is_output = true,
@@ -533,7 +555,7 @@ test "audio graph scheduling" {
     try testing.expectEqualSlices(*Unit, &[_]*Unit{ phasor, output }, graph.schedule.items);
 }
 
-test "audio graph running" {
+test "audio graph run" {
     // Create an audio context
     var graph = try Graph.init(testing.allocator, .{
         .sample_rate = 10,
@@ -559,4 +581,36 @@ test "audio graph running" {
     try graph.run(0, &input_channels, &output_channels);
 
     try expectSlicesApproxEqAbs(f32, &expected, &output_block, 0.01);
+}
+
+test "audio graph run stereo" {
+    // Create an audio context
+    var graph = try Graph.init(testing.allocator, .{
+        .sample_rate = 10,
+        .block_size = 20,
+    });
+    defer graph.deinit();
+
+    var phasor = try graph.add(Phasor.unit());
+    var output = try graph.add(Output.unit());
+
+    try graph.connect(phasor, output, 0);
+    try graph.connect(phasor, output, 1);
+
+    try graph.reschedule();
+
+    try testing.expectEqualSlices(*Unit, &[_]*Unit{ phasor, output }, graph.schedule.items);
+
+    var expected = [10]f32{ 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.0 } ** 2;
+    var input_block_0 = [1]f32{0} ** 20;
+    var input_block_1 = [1]f32{0} ** 20;
+    var output_block_0 = [1]f32{0} ** 20;
+    var output_block_1 = [1]f32{0} ** 20;
+    var input_channels = [2][]f32{ &input_block_0, &input_block_1 };
+    var output_channels = [2][]f32{ &output_block_0, &output_block_1 };
+
+    try graph.run(0, &input_channels, &output_channels);
+
+    try expectSlicesApproxEqAbs(f32, &expected, &output_block_0, 0.01);
+    try expectSlicesApproxEqAbs(f32, &expected, &output_block_1, 0.01);
 }

@@ -1,5 +1,6 @@
 const std = @import("std");
 const testing = std.testing;
+const Unit = @import("graph.zig").Unit;
 
 /// A psuedo-random noise generator using a Linear feedback shift register (LFSR).
 /// https://en.wikipedia.org/wiki/Linear-feedback_shift_register#Xorshift_LFSRs
@@ -27,6 +28,35 @@ pub const Noise = struct {
             noise.lastRandom = @bitCast(i16, 2 *% (noise.seed & 0x1) -% 1);
         }
         return @intToFloat(f32, noise.lastRandom);
+    }
+
+    pub fn run(obj: *Unit, _: usize, _: [][]const f32, outputs: [][]f32) void {
+        var self = @ptrCast(*Noise, @alignCast(@alignOf(Noise), &obj.data));
+        var i: usize = 0;
+        while (i < outputs[0].len) : (i += 1) {
+            var _sample = self.sample(obj.sample_rate);
+            for (outputs) |output| {
+                output[i] += _sample;
+            }
+        }
+    }
+
+    pub fn unit(seed: u16) Unit {
+        var obj = Unit{
+            .name = "Noise",
+            .run = run,
+            .data = undefined,
+            .inputs = 0,
+            .outputs = 1,
+        };
+        var self = @ptrCast(*Noise, @alignCast(@alignOf(Noise), &obj.data));
+        self.* = Noise{ .seed = seed };
+        return obj;
+    }
+
+    pub fn setUnitFrequency(obj: *Unit, frequency: f32) void {
+        var self = @ptrCast(*Noise, @alignCast(@alignOf(Noise), &obj.data));
+        self.frequency = frequency;
     }
 };
 
@@ -60,6 +90,7 @@ pub const Square = struct {
 
     /// Returns the next value of the square wave for the given sample rate
     pub fn sample(square: *Square, sample_rate: usize) f32 {
+        if (square.frequency == 0) return 0;
         const phaseInc = (square.frequency) / @intToFloat(f32, sample_rate);
         square.phase += phaseInc;
 
@@ -82,6 +113,40 @@ pub const Square = struct {
         }
         return multiplier * polyblep(dutyPhase, dutyPhaseInc);
     }
+
+    pub fn run(obj: *Unit, _: usize, _: [][]const f32, outputs: [][]f32) void {
+        var self = @ptrCast(*Square, @alignCast(@alignOf(Square), &obj.data));
+        var i: usize = 0;
+        while (i < outputs[0].len) : (i += 1) {
+            var _sample = self.sample(obj.sample_rate);
+            for (outputs) |output| {
+                output[i] += _sample;
+            }
+        }
+    }
+
+    pub fn unit() Unit {
+        var obj = Unit{
+            .name = "Square",
+            .run = run,
+            .data = undefined,
+            .inputs = 0,
+            .outputs = 1,
+        };
+        var self = @ptrCast(*Square, @alignCast(@alignOf(Square), &obj.data));
+        self.* = Square{};
+        return obj;
+    }
+
+    pub fn setUnitFrequency(obj: *Unit, frequency: f32) void {
+        var self = @ptrCast(*Square, @alignCast(@alignOf(Square), &obj.data));
+        self.frequency = frequency;
+    }
+
+    pub fn setUnitDuty(obj: *Unit, duty: f32) void {
+        var self = @ptrCast(*Square, @alignCast(@alignOf(Square), &obj.data));
+        self.dutyCycle = duty;
+    }
 };
 
 test "square wave usage example" {
@@ -97,11 +162,41 @@ pub const Triangle = struct {
     frequency: f32 = 0,
 
     pub fn sample(triangle: *Triangle, sample_rate: usize) f32 {
+        if (triangle.frequency == 0) return 0;
         triangle.phase += (triangle.frequency) / @intToFloat(f32, sample_rate);
         if (triangle.phase >= 1) {
             triangle.phase -= 1;
         }
         return (2 * @fabs(2 * triangle.phase - 1) - 1);
+    }
+
+    pub fn run(obj: *Unit, _: usize, _: [][]const f32, outputs: [][]f32) void {
+        var self = @ptrCast(*Triangle, @alignCast(@alignOf(Triangle), &obj.data));
+        var i: usize = 0;
+        while (i < outputs[0].len) : (i += 1) {
+            var _sample = self.sample(obj.sample_rate);
+            for (outputs) |output| {
+                output[i] += _sample;
+            }
+        }
+    }
+
+    pub fn unit() Unit {
+        var obj = Unit{
+            .name = "Triangle",
+            .run = run,
+            .data = undefined,
+            .inputs = 0,
+            .outputs = 1,
+        };
+        var self = @ptrCast(*Triangle, @alignCast(@alignOf(Triangle), &obj.data));
+        self.* = Triangle{};
+        return obj;
+    }
+
+    pub fn setUnitFrequency(obj: *Unit, frequency: f32) void {
+        var self = @ptrCast(*Triangle, @alignCast(@alignOf(Triangle), &obj.data));
+        self.frequency = frequency;
     }
 };
 

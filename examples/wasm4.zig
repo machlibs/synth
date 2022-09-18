@@ -7,12 +7,16 @@ const sysaudio = mach.sysaudio;
 const js = mach.sysjs;
 const builtin = @import("builtin");
 
+const Graph = synth.graph.Graph;
+const Unit = synth.graph.Unit;
+
 pub const App = @This();
 
 audio: sysaudio,
 device: *sysaudio.Device,
 tone_engine: ToneEngine = undefined,
 channel: usize = 0,
+gpa: std.heap.GeneralPurposeAllocator(.{}),
 
 pub fn init(app: *App, core: *mach.Core) !void {
     const audio = try sysaudio.init();
@@ -21,25 +25,27 @@ pub fn init(app: *App, core: *mach.Core) !void {
     var device = try audio.requestDevice(core.allocator, .{ .mode = .output, .channels = 2 });
     errdefer device.deinit(core.allocator);
 
-    device.setCallback(callback, app);
-    try device.start();
-
     app.audio = audio;
     app.device = device;
-    app.tone_engine = .{};
+    app.gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    app.tone_engine = try ToneEngine.init(app.gpa.allocator(), app.device.properties);
+
+    device.setCallback(callback, app);
+    try device.start();
 }
 
 fn callback(device: *sysaudio.Device, user_data: ?*anyopaque, buffer: []u8) void {
     // TODO(sysaudio): should make user_data pointer type-safe
     const app: *App = @ptrCast(*App, @alignCast(@alignOf(App), user_data));
 
-    // Where the magic happens: fill our audio buffer with PCM dat.
+    // Where the magic happens: fill our audio buffer with PCM data.
     app.tone_engine.render(device.properties, buffer);
 }
 
 pub fn deinit(app: *App, core: *mach.Core) void {
     app.device.deinit(core.allocator);
     app.audio.deinit();
+    app.tone_engine.deinit();
 }
 
 pub fn update(app: *App, engine: *mach.Core) !void {
@@ -66,131 +72,16 @@ pub fn update(app: *App, engine: *mach.Core) !void {
     }
 }
 
-const Command = union(enum) {
-    SetOut: usize,
-    SetIn: usize,
-    RunUnit: usize,
-    Output: usize,
-};
-
-const Runner = struct {
-    out: usize = 0,
-    in: usize = 0,
-    units: [9]Unit,
-    bus: [6][128]f32 = std.mem.zeroes([6][128]f32),
-
-    pub fn run(runner: *Runner, time: usize, sample_rate: usize, program: []const Command) []f32 {
-        // Reset buffer
-        for (runner.bus) |*bus| {
-            for (bus) |*sample| {
-                sample.* = 0;
-            }
-        }
-        // Run program
-        for (program) |command| {
-            switch (command) {
-                .SetOut => |out| runner.out = out,
-                .SetIn => |in| runner.in = in,
-                .RunUnit => |unit| switch (runner.units[unit]) {
-                    .Env => |*env| {
-                        var i: usize = 0;
-                        while (i < 128) : (i += 1) {
-                            runner.bus[runner.out][i] += runner.bus[runner.in][i] * env.sample(time + i);
-                        }
-                    },
-                    .Osc => |*osc| {
-                        var i: usize = 0;
-                        while (i < 128) : (i += 1) {
-                            switch (osc.*) {
-                                .Noise => |*noise| {
-                                    runner.bus[runner.out][i] += noise.sample(sample_rate);
-                                },
-                                .Square => |*square| {
-                                    runner.bus[runner.out][i] += square.sample(sample_rate);
-                                },
-                                .Triangle => |*triangle| {
-                                    runner.bus[runner.out][i] += triangle.sample(sample_rate);
-                                },
-                            }
-                        }
-                    },
-                    .Gain => |gain| {
-                        var i: usize = 0;
-                        while (i < 128) : (i += 1) {
-                            runner.bus[runner.out][i] += runner.bus[runner.in][i] * gain;
-                        }
-                    },
-                },
-                .Output => |bus| {
-                    return &runner.bus[bus];
-                },
-            }
-        }
-        return &runner.bus[runner.out];
-    }
-};
-
-const Unit = union(enum) {
-    Osc: synth.Oscillator,
-    Env: synth.APDHSR,
-    Gain: f32,
-};
-
-const Graph = struct {
-    nodes: []Unit,
-};
-
 // A simple synthesizer emulating the WASM4 APU.
 pub const ToneEngine = struct {
     /// The time in samples
     time: usize = 0,
-    program: []const Command = &[_]Command{
-        .{ .SetOut = 0 },
-        .{ .RunUnit = 0 },
 
-        .{ .SetOut = 1 },
-        .{ .RunUnit = 1 },
-
-        .{ .SetOut = 2 },
-        .{ .RunUnit = 2 },
-
-        .{ .SetOut = 3 },
-        .{ .RunUnit = 3 },
-
-        .{ .SetOut = 4 },
-        .{ .SetIn = 0 },
-        .{ .RunUnit = 4 },
-
-        .{ .SetIn = 1 },
-        .{ .RunUnit = 5 },
-
-        .{ .SetIn = 2 },
-        .{ .RunUnit = 6 },
-
-        .{ .SetIn = 3 },
-        .{ .RunUnit = 7 },
-
-        .{ .SetOut = 5 },
-        .{ .SetIn = 4 },
-        .{ .RunUnit = 8 },
-        // .{ .Output = 5 },
-    },
-    outbuffer: [128]f32 = [_]f32{0} ** 128,
-    outlen: usize = 0,
     /// Wasm4 has 4 channels with predefined waveforms
-    runner: Runner = Runner{
-        .units = .{
-            .{ .Osc = .{ .Square = .{ .dutyCycle = 0.5 } } },
-            .{ .Osc = .{ .Square = .{ .dutyCycle = 0.5 } } },
-            .{ .Osc = .{ .Triangle = .{} } },
-            .{ .Osc = .{ .Noise = .{ .seed = 0x01 } } },
-            .{ .Env = std.mem.zeroes(synth.APDHSR) },
-            .{ .Env = std.mem.zeroes(synth.APDHSR) },
-            .{ .Env = std.mem.zeroes(synth.APDHSR) },
-            .{ .Env = std.mem.zeroes(synth.APDHSR) },
-            .{ .Gain = 0.1 },
-        },
-    },
+    graph: Graph,
+    osc_units: [4]*Unit,
+    env_units: [4]*Unit,
+    output_unit: *Unit,
 
     /// Controls overall volume
     volume: f32 = 0x1333.0 / 0xFFFF.0,
@@ -199,10 +90,57 @@ pub const ToneEngine = struct {
     min_count: usize = std.math.maxInt(usize),
     max_count: usize = 0,
 
+    pub fn init(allocator: std.mem.Allocator, properties: sysaudio.Device.Properties) !ToneEngine {
+        var engine = ToneEngine{
+            .graph = try Graph.init(allocator, .{
+                .sample_rate = properties.sample_rate,
+            }),
+            .osc_units = undefined,
+            .env_units = undefined,
+            .output_unit = undefined,
+        };
+
+        // Create unit generators
+        engine.osc_units = .{
+            try engine.graph.add(synth.osc.Square.unit()),
+            try engine.graph.add(synth.osc.Square.unit()),
+            try engine.graph.add(synth.osc.Triangle.unit()),
+            try engine.graph.add(synth.osc.Noise.unit(0x01)),
+        };
+        engine.env_units = .{
+            try engine.graph.add(synth.env.APDHSR.unit()),
+            try engine.graph.add(synth.env.APDHSR.unit()),
+            try engine.graph.add(synth.env.APDHSR.unit()),
+            try engine.graph.add(synth.env.APDHSR.unit()),
+        };
+        engine.output_unit = try engine.graph.add(synth.units.Output.unit());
+
+        // Connect unit generators
+        try engine.graph.connect(engine.osc_units[0], engine.env_units[0], 0);
+        try engine.graph.connect(engine.osc_units[1], engine.env_units[1], 0);
+        try engine.graph.connect(engine.osc_units[2], engine.env_units[2], 0);
+        try engine.graph.connect(engine.osc_units[3], engine.env_units[3], 0);
+
+        try engine.graph.connect(engine.env_units[0], engine.output_unit, 0);
+        try engine.graph.connect(engine.env_units[1], engine.output_unit, 0);
+        try engine.graph.connect(engine.env_units[2], engine.output_unit, 0);
+        try engine.graph.connect(engine.env_units[3], engine.output_unit, 0);
+
+        // TODO: multiple channels
+
+        try engine.graph.reschedule();
+
+        return engine;
+    }
+
+    pub fn deinit(engine: *ToneEngine) void {
+        engine.graph.deinit();
+    }
+
     pub fn render(engine: *ToneEngine, properties: sysaudio.Device.Properties, buffer: []u8) void {
         engine.min_count = @minimum(engine.min_count, buffer.len / properties.channels);
         engine.max_count = @maximum(engine.max_count, buffer.len / properties.channels);
-        // Ignore everything but f32 for now
+        // TODO: add support for other types again
         if (properties.format != .F32) return;
         const buf = @ptrCast([*]f32, @alignCast(@alignOf(f32), buffer.ptr))[0 .. buffer.len / @sizeOf(f32)];
         renderWithType(f32, engine, properties, buf);
@@ -211,57 +149,51 @@ pub const ToneEngine = struct {
     pub fn renderWithType(comptime T: type, engine: *ToneEngine, properties: sysaudio.Device.Properties, buffer: []T) void {
         const frames = buffer.len / properties.channels;
 
-        var frame: usize = 0;
-        if (engine.outlen != 0) {
-            var channel: usize = 0;
-            while (channel < properties.channels) : (channel += 1) {
-                for (engine.outbuffer[0..engine.outlen]) |sample, i| {
-                    var channel_buffer = buffer[channel * frames .. (channel + 1) * frames];
-                    channel_buffer[frame + i] = sample;
-                }
-            }
-            engine.outlen = 0;
+        for (buffer) |*sample| {
+            sample.* = 0.0;
         }
 
-        const remainder = frames % 128;
+        const remainder = frames % engine.graph.max_block_size;
+        var frame: usize = 0;
         while (frame < frames) {
-            var samples = engine.runner.run(engine.time + frame, properties.sample_rate, engine.program);
+            var inputs_buf = [_][]const f32{&.{}} ** 16;
+            const inputs = inputs_buf[0..1];
 
-            const send = if (frame + samples.len > frames) remainder else 128;
+            var outputs_buf = [_][]f32{&.{}} ** 16;
+            const outputs = outputs_buf[0..properties.channels];
 
-            // Emit the sample on all channels.
             var channel: usize = 0;
+            const length = if (frame + engine.graph.max_block_size > frames) remainder else engine.graph.max_block_size;
             while (channel < properties.channels) : (channel += 1) {
-                for (samples[0..send]) |sample, i| {
-                    var channel_buffer = buffer[channel * frames .. (channel + 1) * frames];
-                    channel_buffer[frame + i] = sample;
-                }
+                const start = channel * frames + frame;
+                outputs_buf[channel] = buffer[start .. start + length];
             }
-            if (send != 128) {
-                for (samples[send..]) |sample, i| {
-                    engine.outbuffer[i] = sample;
-                }
-                engine.outlen = 128 - send;
-            }
-            frame += samples.len;
+
+            engine.graph.run(engine.time + frame, inputs, outputs) catch return;
+
+            frame += length;
         }
         engine.time += frames;
     }
 
     pub fn play(engine: *ToneEngine, properties: sysaudio.Device.Properties, channel: usize, frequency: f32) void {
-        switch (engine.runner.units[channel].Osc) {
-            .Square => |*square| square.frequency = frequency,
-            .Triangle => |*triangle| triangle.frequency = frequency,
-            .Noise => |*noise| noise.frequency = frequency,
+        switch (channel) {
+            0, 1 => synth.osc.Square.setUnitFrequency(engine.osc_units[channel], frequency),
+            2 => synth.osc.Triangle.setUnitFrequency(engine.osc_units[channel], frequency),
+            3 => synth.osc.Noise.setUnitFrequency(engine.osc_units[channel], frequency),
+            else => return,
         }
         const sample_rate = @intToFloat(f32, properties.sample_rate);
-        engine.runner.units[channel + 4].Env.attack = @floatToInt(usize, sample_rate * 0.1);
-        engine.runner.units[channel + 4].Env.peak = 1;
-        engine.runner.units[channel + 4].Env.decay = @floatToInt(usize, sample_rate * 0.1);
-        engine.runner.units[channel + 4].Env.hold = @floatToInt(usize, sample_rate * 0.1);
-        engine.runner.units[channel + 4].Env.sustain = 0.5;
-        engine.runner.units[channel + 4].Env.release = @floatToInt(usize, sample_rate * 0.1);
-        engine.runner.units[channel + 4].Env.start(engine.time);
+        const params = synth.env.APDHSR.Params{
+            .attack = @floatToInt(usize, sample_rate * 0.1),
+            .peak = 1,
+            .decay = @floatToInt(usize, sample_rate * 0.1),
+            .hold = @floatToInt(usize, sample_rate * 0.1),
+            .sustain = 0.5,
+            .release = @floatToInt(usize, sample_rate * 0.1),
+        };
+        synth.env.APDHSR.setUnitParams(engine.env_units[channel], params);
+        synth.env.APDHSR.startUnit(engine.env_units[channel], engine.time);
     }
 
     pub fn keyToFrequency(key: mach.Key) f32 {

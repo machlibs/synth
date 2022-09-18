@@ -11,7 +11,7 @@ pub const Unit = struct {
     name: []const u8,
     is_output: bool = false,
     sample_rate: usize = 0,
-    block_size: usize = 0,
+    max_block_size: usize = 0,
     bus_ids: [16]usize = .{0} ** 16, // TODO: figure out long-term plan for multi-channel units
     inputs: usize = 0,
     inputs_connected: usize = 0,
@@ -28,11 +28,11 @@ pub const Unit = struct {
     }
 };
 
-const Graph = struct {
+pub const Graph = struct {
     /// The audio sample_rate
     sample_rate: usize,
     /// How many audio frames are processed at a time
-    block_size: usize,
+    max_block_size: usize,
     allocator: std.mem.Allocator,
     /// Unit pool
     unit_pool: Pool(Unit),
@@ -70,7 +70,7 @@ const Graph = struct {
         allocator: std.mem.Allocator,
         opt: struct {
             sample_rate: usize,
-            block_size: usize = 128,
+            max_block_size: usize = 128,
             unit_capacity: usize = 128,
             connection_capacity: usize = 256,
             max_outputs: usize = 16,
@@ -81,7 +81,7 @@ const Graph = struct {
         const scratch_buffer = try allocator.alloc(u8, opt.scratch_buffer_size);
         return Graph{
             .sample_rate = opt.sample_rate,
-            .block_size = opt.block_size,
+            .max_block_size = opt.max_block_size,
             .allocator = allocator,
             .unit_pool = try Pool(Unit).initCapacity(allocator, opt.unit_capacity),
             .connection = try std.ArrayList(Connection).initCapacity(allocator, opt.connection_capacity),
@@ -89,7 +89,7 @@ const Graph = struct {
             .schedule = try std.ArrayList(*Unit).initCapacity(allocator, opt.unit_capacity),
             .scratch_buffer = scratch_buffer,
             .scratch_fba = std.heap.FixedBufferAllocator.init(scratch_buffer),
-            .bus_buffer = try allocator.alloc(f32, opt.block_size * opt.bus_capacity),
+            .bus_buffer = try allocator.alloc(f32, opt.max_block_size * opt.bus_capacity),
         };
     }
 
@@ -109,7 +109,7 @@ const Graph = struct {
         var new_unit = try graph.unit_pool.new();
         new_unit.* = unit;
         new_unit.sample_rate = graph.sample_rate;
-        new_unit.block_size = graph.block_size;
+        new_unit.max_block_size = graph.max_block_size;
 
         graph.modification_count +%= 1;
         graph.unit_count += 1;
@@ -127,7 +127,7 @@ const Graph = struct {
         var new_unit = try graph.unit_pool.newFromPool();
         new_unit.* = unit;
         new_unit.sample_rate = graph.sample_rate;
-        new_unit.block_size = graph.block_size;
+        new_unit.max_block_size = graph.max_block_size;
 
         graph.modification_count +%= 1;
         graph.unit_count += 1;
@@ -245,8 +245,8 @@ const Graph = struct {
     }
 
     pub fn getBus(graph: *Graph, bus_number: usize) []f32 {
-        const start = bus_number * graph.block_size;
-        const end = start + graph.block_size;
+        const start = bus_number * graph.max_block_size;
+        const end = start + graph.max_block_size;
         return graph.bus_buffer[start..end];
     }
 
@@ -265,6 +265,7 @@ const Graph = struct {
 
         for (graph.schedule.items) |unit| {
             const input_channels = input_channels: {
+                // TODO: microphone/line in input
                 var i: usize = 0;
                 while (i < unit.inputs_connected) : (i += 1) {
                     const unit_bus = graph.getBus(unit.bus_ids[i]);
@@ -378,7 +379,7 @@ test "audio graph simple phasor" {
     // Create an audio context
     var graph = try Graph.init(testing.allocator, .{
         .sample_rate = 10,
-        .block_size = 1,
+        .max_block_size = 1,
     });
     defer graph.deinit();
 
@@ -422,7 +423,7 @@ test "audio graph phasor" {
     // Create an audio context
     var graph = try Graph.init(testing.allocator, .{
         .sample_rate = 10,
-        .block_size = 20,
+        .max_block_size = 20,
     });
     defer graph.deinit();
 
@@ -443,7 +444,7 @@ test "audio graph connect/disconnect" {
     // Create an audio context
     var graph = try Graph.init(testing.allocator, .{
         .sample_rate = 10,
-        .block_size = 20,
+        .max_block_size = 20,
     });
     defer graph.deinit();
 
@@ -468,7 +469,7 @@ test "audio graph removal" {
     // Create an audio context
     var graph = try Graph.init(testing.allocator, .{
         .sample_rate = 10,
-        .block_size = 20,
+        .max_block_size = 20,
     });
     defer graph.deinit();
 
@@ -491,7 +492,7 @@ test "audio graph scheduling" {
     // Create an audio context
     var graph = try Graph.init(testing.allocator, .{
         .sample_rate = 10,
-        .block_size = 20,
+        .max_block_size = 20,
     });
     defer graph.deinit();
 
@@ -509,7 +510,7 @@ test "audio graph run" {
     // Create an audio context
     var graph = try Graph.init(testing.allocator, .{
         .sample_rate = 10,
-        .block_size = 20,
+        .max_block_size = 20,
     });
     defer graph.deinit();
 
@@ -537,7 +538,7 @@ test "audio graph run stereo" {
     // Create an audio context
     var graph = try Graph.init(testing.allocator, .{
         .sample_rate = 10,
-        .block_size = 20,
+        .max_block_size = 20,
     });
     defer graph.deinit();
 

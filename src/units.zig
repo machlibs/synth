@@ -3,7 +3,7 @@ const graph = @import("graph.zig");
 
 const Unit = graph.Unit;
 
-fn phasor(sample_rate: usize, time: usize, frequency: f32, phase: f32) f32 {
+pub fn phasor(sample_rate: usize, time: usize, frequency: f32, phase: f32) f32 {
     const increase = frequency / @intToFloat(f32, sample_rate);
     const value = @intToFloat(f32, time) * increase + phase;
     return value - std.math.floor(value);
@@ -20,7 +20,7 @@ pub const Phasor = struct {
         var phase = phasor(obj.sample_rate, time, self.frequency, self.phase);
         const phase_increase = self.frequency / @intToFloat(f32, obj.sample_rate);
         var i: usize = 0;
-        while (i < obj.block_size) : (i += 1) {
+        while (i < outputs.len) : (i += 1) {
             phase += phase_increase;
             if (phase >= 1.0) phase = 0;
             for (outputs) |output| {

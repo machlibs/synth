@@ -1,17 +1,23 @@
 # Synth (WIP)
 
-A library of synthesizers to be used in games with note based music engines.
-This is an experimental library and the goals and overall structure are subject
-to change.
+A digital signal processing (DSP) engine for use in games. Implements an API
+similar to webaudio or miniaudio.
 
 ## TODO
 
-- [ ] Simple oscillators
-  - [x] Square
-  - [ ] Sine
-  - [ ] Sawtooth
-  - [x] Triangle
-  - [x] Noise
+- [ ] Audio Graph
+  - [ ] Oscillators
+    - [x] Phasor
+    - [x] Square
+    - [ ] Sine
+    - [ ] Sawtooth
+    - [x] Triangle
+    - [x] Noise
+  - [ ] Envelopes
+    - [ ] ADSR
+    - [x] APDHSR
+  - [ ] Filters
+    - [ ] Biquad
 - [ ] MIDI Support
   - [ ] Standard MIDI Files (.midi)
   - [ ] Input/Output
@@ -20,6 +26,20 @@ to change.
 - [ ] Wavetable Synth
   - [ ] .sf2 file support
 - [ ] Examples
-  - [ ] WASM4 APU
+  - [x] WASM4 APU
   - [ ] TIC-80 APU
   - [ ] Sfxr
+- [ ] Audio File Import
+  - [x] WAV
+  - [ ] FLAC
+  - [ ] Vorbis
+  - [ ] Opus
+- [ ] Audio File Export
+  - [ ] WAV
+  - [ ] FLAC
+  - [ ] Vorbis
+  - [ ] Opus
+- [ ] Visualization
+  - [ ] Waveform
+  - [ ] Spectral graph
+  - [ ] Spectrogram

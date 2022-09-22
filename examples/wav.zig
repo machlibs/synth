@@ -1,4 +1,7 @@
-//! Example showing how to build a synth like the WASM4 APU
+//! Example showing how to play back a wav file from memory.
+//! https://freesound.org/people/JarredGibb/sounds/219453/
+//! Audio is courtesy of Jarred Gibb at the link above, and has
+//! been released into the Public Domain under the CC0 license.
 const std = @import("std");
 const mach = @import("mach");
 const gpu = @import("gpu");

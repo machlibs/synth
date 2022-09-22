@@ -2,9 +2,61 @@ const std = @import("std");
 const testing = std.testing;
 
 const WAV = @This();
+const Unit = @import("graph.zig").Unit;
 
 format: Format,
+sample_length: usize,
 samples: WavData,
+
+pub const WavUnit = struct {
+    pos: usize,
+    channels: usize,
+    samples: []f32,
+
+    pub fn run(obj: *Unit, _: usize, _: [][]const f32, outputs: [][]f32) void {
+        if (isFinished(obj)) return;
+        // TODO: Re-sample to the correct sampling rate
+        var self = @ptrCast(*WavUnit, @alignCast(@alignOf(WavUnit), &obj.data));
+        const sample_count: usize = self.samples.len / self.channels;
+        var i: usize = 0;
+        outer: while (i < outputs[0].len and i < sample_count) : (i += 1) {
+            var c: usize = 0;
+            // std.log.info("channel {}", .{c});
+            while (c < self.channels and c < outputs.len) : (c += 1) {
+                var pos = self.pos + i * self.channels + c;
+                if (pos >= self.samples.len) break :outer;
+                outputs[c][i] += self.samples[pos];
+            }
+        }
+        self.pos += i * self.channels;
+    }
+
+    pub fn isFinished(obj: *Unit) bool {
+        var self = @ptrCast(*WavUnit, @alignCast(@alignOf(WavUnit), &obj.data));
+        if (self.pos >= self.samples.len) return true;
+        return false;
+    }
+
+    pub fn unitFromMemory(alloc: std.mem.Allocator, memory: []const u8) !Unit {
+        var obj = Unit{
+            .name = "WAV",
+            .run = run,
+            .data = undefined,
+            .inputs = 0,
+            .outputs = 1,
+        };
+        var self = @ptrCast(*WavUnit, @alignCast(@alignOf(WavUnit), &obj.data));
+        var wav = try WAV.readFromBuffer(alloc, memory);
+        defer wav.free(alloc);
+        self.* = WavUnit{
+            .samples = try alloc.alloc(f32, wav.sample_length),
+            .pos = 0,
+            .channels = wav.format.num_channels,
+        };
+        try wav.toF32(self.samples);
+        return obj;
+    }
+};
 
 /// Read wav file from given reader
 pub fn read(alloc: std.mem.Allocator, reader: anytype) !WAV {
@@ -28,6 +80,7 @@ pub fn read(alloc: std.mem.Allocator, reader: anytype) !WAV {
 
     return WAV{
         .format = format,
+        .sample_length = sample_num,
         .samples = data_buffer,
     };
 }
@@ -50,7 +103,7 @@ pub fn free(wav: *WAV, alloc: std.mem.Allocator) void {
 }
 
 /// Convert the u8 or i16 data into floating point samples
-pub fn toF32(wav: *WAV, out: []f32) usize {
+pub fn toF32(wav: *WAV, out: []f32) !void {
     switch (wav.samples) {
         .UInt8 => |slice| {
             if (out.len < slice.len) return error.OutOfMemory;

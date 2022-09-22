@@ -29,6 +29,11 @@ pub const Phasor = struct {
         }
     }
 
+    pub fn setUnitFrequency(obj: *Unit, frequency: f32) void {
+        var self = @ptrCast(*Phasor, @alignCast(@alignOf(Phasor), &obj.data));
+        self.frequency = frequency;
+    }
+
     pub fn unit() Unit {
         var obj = Unit{
             .name = "Phasor",
@@ -46,7 +51,9 @@ pub const Phasor = struct {
 pub const Output = struct {
     pub fn run(_: *Unit, _: usize, bus: [][]const f32, outputs: [][]f32) void {
         for (outputs) |output, i| {
+            if (i >= bus.len) break;
             for (output) |*sample, a| {
+                if (a >= bus[i].len) break;
                 sample.* += bus[i][a];
             }
         }
@@ -71,7 +78,9 @@ pub const Gain = struct {
     pub fn run(obj: *Unit, _: usize, bus: [][]const f32, outputs: [][]f32) void {
         var self = @ptrCast(*Gain, @alignCast(@alignOf(Gain), &obj.data));
         for (outputs) |output, i| {
+            if (i > bus.len) break;
             for (output) |*sample, a| {
+                if (i > bus[i].len) break;
                 sample.* += self.level * bus[i][a];
             }
         }

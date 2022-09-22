@@ -11,7 +11,7 @@ const deps = [_]fetch.Dependency{
     .{ .git = .{
         .name = "mach",
         .url = "https://github.com/hexops/mach",
-        .commit = "47d1544b6483ec6038fcc0eb2b90c14f8ab8d253",
+        .commit = "02ab8f964aa217a87b21d5b3f92f21b03c4a36d4",
     } },
 };
 
@@ -28,6 +28,8 @@ pub fn build(b: *std.build.Builder) !void {
 
     fetch.addStep(b, "example-wasm4-apu", "Builds the wasm4-apu example");
     fetch.addStep(b, "run-example-wasm4-apu", "Runs the wasm4-apu example");
+    fetch.addStep(b, "example-wav", "Builds the wav example");
+    fetch.addStep(b, "run-example-wav", "Runs the wav example");
     try fetch.fetchAndBuild(b, "zig-deps", &deps, "compile.zig");
 }
 

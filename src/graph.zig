@@ -517,6 +517,8 @@ test "audio graph run" {
     var phasor = try graph.add(Phasor.unit());
     var output = try graph.add(Output.unit());
 
+    Phasor.setUnitFrequency(phasor, 1);
+
     try graph.connect(phasor, output, 0);
 
     try graph.reschedule();

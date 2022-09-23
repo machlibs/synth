@@ -368,35 +368,17 @@ pub const Hexwave = struct {
     current: Parameters,
     /// The parameters that are waiting to be applied
     pending: ?Parameters,
-    width: usize,
-    oversample: usize,
-    user_buffer: []f32,
     /// Lookup table for the blep function
-    blep: *HexBlep,
+    hex_blep: *HexBlep,
 
-    /// A convenience function wrapping `init()` that will allocate `user_buffer` for you
-    pub fn initAlloc(alloc: std.mem.Allocator, width: usize, oversample: usize, parameters: Parameters) !Hexwave {
-        const blep_buffer_count = width * (oversample + 1);
-        const user_buffer = try alloc.alloc(f32, blep_buffer_count);
-        const blep_ = try alloc.create(blep);
-        // blep
-        blep_.* = OversampledBlepLike{
-            .width = width,
-            .oversample = oversample,
-            .blep = user_buffer[0..oversample],
-            .blamp = user_buffer[oversample..],
-        };
-        return init(blep_, parameters);
-    }
-
-    /// Creates a hexwave oscillator. The `user_buffer` is a temporary buffer.
-    pub fn init(blep: *HexBlep, parameters: Parameters) Hexwave {
+    /// Creates a hexwave oscillator
+    pub fn init(hex_blep: *HexBlep, parameters: Parameters) Hexwave {
         return Hexwave{
             .t = 0,
             .prev_dt = 0,
             .current = parameters,
             .pending = null,
-            .blep = blep_,
+            .hex_blep = hex_blep,
         };
     }
 
@@ -418,77 +400,156 @@ pub const Hexwave = struct {
 
     /// 9 vertices, 4 for each side  plus 1 more for wraparound
     fn generateLineSegments(hex: *Hexwave, dt: f32) [9]HexVert {
-        _ = hex;
-        _ = dt;
-        // TODO: Generate line segments
+        var vert: [9]HexVert = undefined;
+        var min_len: f32 = dt / 256.0;
+
+        vert[0].time = 0;
+        vert[0].value = 0;
+        vert[1].time = hex.current.zero_wait * 0.5;
+        vert[1].value = 0;
+        vert[2].time = 0.5 * hex.current.peak_time + vert[1].time * (1 - hex.current.peak_time);
+        vert[2].value = 0;
+        vert[3].time = 0.5;
+        vert[3].value = hex.current.half_height;
+
+        if (hex.current.reflect) {
+            var j = 4;
+            while (j <= 7) : (j += 1) {
+                vert[j].time = 1 - vert[7 - j].time;
+                vert[j].value = -vert[7 - j].value;
+            }
+        } else {
+            var j = 4;
+            while (j <= 7) : (j += 1) {
+                vert[j].time = 0.5 - vert[j - 4].time;
+                vert[j].value = -vert[j - 4].value;
+            }
+        }
+
+        vert[8].time = 1;
+        vert[8].value = 0;
+        {
+            var j = 0;
+            while (j < 8) : (j += 1) {
+                if (vert[j + 1].time <= vert[j].time + min_len) {
+                    // Comment transcribed from stb_hexwave
+                    // If change takes place over less than a fraction of a sample treat as discountinuity
+                    //
+                    // Otherwise the slope computation can blow up to arbitrarily large and we
+                    // try to generate a huge BLAMP and the result is wrong.
+                    //
+                    // Why does this happen if the math is right? I believe if done perfectly,
+                    // the two BLAMPs on either side of the slope would cancel out, but our
+                    // BLAMPs have only limited sub-sample precision and limited integration
+                    // accuracy . Or maybe it's just the math blowing up w/ floating point precision
+                    // limits as we try to make x * (1/x) cancel out
+                    //
+                    // min_len verified artifact-free even near nyquist with only oversample = 4
+                    vert[j + 1].time = vert[j].time;
+                }
+            }
+        }
+
+        if (vert[9].time != 1.0) {
+            // If the above fixup moved the endpoint away from 1.0, move it back,
+            // along with any other vertices that got moved to the same time
+            const time = vert[8].time;
+            var j: usize = 0;
+            while (j <= 8) : (j += 1) {
+                if (vert[j].time == time) {
+                    vert[j].time = 1.0;
+                }
+            }
+        }
+
+        {
+            // Compute the exact slopes from the final fixed-up positions
+            var j: usize = 0;
+            while (j < 8) : (j += 1) {
+                if (vert[j + 1].time == vert[j].time) {
+                    vert[j].slope = 0;
+                } else {
+                    vert[j].slope = (vert[j + 1].value - vert[j].value) / (vert[j + 1].time - vert[j].time);
+                }
+            }
+        }
+
+        vert[8].time = 1;
+        vert[8].value = vert[0].value;
+        vert[8].slope = vert[0].slope;
+
+        return vert;
     }
 
+    // According to stb, ought to be good enough for anybody
+    const MAX_BLEP_LENGTH = 64;
+
     /// Generates samples into the `out` buffer. Divide the frequency by the sample_rate before passing it in as `frequency`.
-    pub fn generateSamples(hex: *Hexwave, out: []f32, frequency: f32) void {
-        // TODO: finish writing this part
+    pub fn generateSamples(hex: *Hexwave, output: []f32, frequency: f32) void {
+        const hex_blep = hex.hex_blep;
         var t = hex.time;
         var temp_output: [2 * MAX_BLEP_LENGTH]f32 = undefined;
-        const buffered_length = @sizeOf(f32) * hexblep.width;
+        const buffered_length = @sizeOf(f32) * hex.hex_blep.width;
         const dt = @fabs(frequency);
         const recip_dt = if (dt == 0.0) 0.0 else 1.0 / dt;
 
-        const halfw = hexblep.width / 2;
-        // all sample times are biased by halfw to leave room for BLEP/BLAMP to go back in time
+        const halfw = hex.hex_blep.width / 2;
+        // All sample times are biased by halfw to leave room for BLEP/BLAMP to go back in time
 
         // Don't try to process a zero length buffer
-        if (num_samples <= 0) return;
+        if (output.len <= 0) return;
 
-        // convert parameters to times and slopes
+        // Convert parameters to times and slopes
         var vert = hex.generateLineSegments(dt);
 
         if (hex.prev_dt != dt) {
-            // if frequency changes, add afixup at the derivative discontinuity starting at now
+            // If frequency changes, add a fixup at the derivative discontinuity starting at now
             var j: usize = 1;
             while (j < 6) : (j += 1) {
                 if (t < vert[j].time) break;
             }
             const slope = vert[j].slope;
-            if (slope != 0) hex.blep.oversampleBlamp(); // TODO
+            if (slope != 0) hex_blep.blamp(output, 0, (dt - hex.prev_dt) * slope);
             hex.prev_dt = dt;
         }
 
-        // copy the buffered dat afrom the last call and clear the rest of the output array
-        // TODO memset output 0 (sizeof f32 * num_samples)
-        // TODO memset temp_output 0 (2 * hexblep.width * sizeof f32)
+        // copy the buffered data from the last call and clear the rest of the output array
+        std.mem.set(f32, output, 0);
+        std.mem.set(f32, temp_output, 0);
 
-        if (num_samples >= hexblep.width) {
-            // if the output is shorter than hexblep.width, we do all synthesis to temp_output
-            // TODO memcpy output hex.buffer buffered_length
+        if (output.len >= hex_blep.width) {
+            std.mem.copy(output, hex.buffer, buffered_length);
         } else {
-            // TODO memcpy temp_output hex.buffer buffered_length
+            // if the output is shorter than hex_blep.width, we do all synthesis to temp_output
+            std.mem.copy(temp_output, hex.buffer, buffered_length);
         }
 
         var pass: usize = 0;
         pass: while (pass < 2) : (pass += 1) {
-            var i0: usize = undefined;
-            var i1: usize = undefined;
-            var out: *f32 = undefined;
+            var i_0: usize = 0;
+            var i_1: usize = 0;
+            var out: []f32 = output;
 
-            // we want to simulat having one buffer that is num_output + hexblep.width
+            // we want to simulat having one buffer that is num_output + hex_blep.width
             // samples long, without putting that requirement on the user, and without
             // allocating a temp buffer that's as long as the whole thing. So we use two
             // overlapping buffers, one the user's buffer and one a fixed-length temp
             // buffer.
             if (pass == 0) {
-                if (num_samples < hexblep.width) continue;
+                if (out.len < hex_blep.width) continue;
                 // run as far as we can without overwriting the end of the user's buffer
                 // TODO is this a place for slicing?
                 out = output;
-                i0 = 0;
-                i1 = num_samples - hexblep.width;
+                i_0 = 0;
+                i_1 = out.len - hex_blep.width;
             } else {
                 //generate the rest into a temp buffer
                 out = temp_output;
-                i0 = 0;
-                if (num_samples >= hexblep.width) {
-                    i1 = hexblep.width;
+                i_0 = 0;
+                if (out.len >= hex_blep.width) {
+                    i_1 = hex_blep.width;
                 } else {
-                    i1 = num_samples;
+                    i_1 = out.len;
                 }
             }
 
@@ -498,20 +559,20 @@ pub const Hexwave = struct {
                 if (t < vert[j + 1].t) break;
             }
 
-            i = i0;
+            var i = i_0;
             while (true) {
                 while (t < vert[j + 1].t) : (i += 1) {
                     // TODO: decipher this loop
-                    if (i == i1) break :pass;
+                    if (i == i_1) break :pass;
                     out[i + halfw] += vert[j].value + vert[j].slope * (t - vert[j].time);
                     t += dt;
                 }
                 // transition from lineseg starting at j to lineseg starting at j + 1
 
                 if (vert[j].time == vert[j + 1].time) {
-                    hex.blep.oversampleBlep(); // TODO
+                    hex_blep.blep(out + i, recip_dt * (t - vert[j + 1].time), (vert[j + 1].value - vert[j].value));
                 }
-                hex.blep.oversampleBlamp(); // TODO
+                hex_blep.blamp(out + i, recip_dt * (t - vert[j + 1].time), dt * (vert[j + 1].slope - vert[j].slope));
 
                 j += 1;
 
@@ -521,16 +582,16 @@ pub const Hexwave = struct {
                     t -= 1.0; // t was >= 1.0 if j==8
                     if (hex.pending) |pending| {
                         const prev_slope = vert[j].slope;
-                        const prev_v0 = vert[j].value;
+                        const prev_value = vert[j].value;
                         hex.current = pending;
                         hex.pending = null;
                         vert = hex.generateLineSegments(dt);
                         // the following never occurs with this oscillator but it makes the code work in more general cases
                         if (vert[j].value != prev_value) {
-                            hex.blep.oversampleBlep(); // TODO
+                            hex_blep.blep(out + i, recip_dt * t, (vert[j].value - prev_value));
                         }
                         if (vert[j].slope != prev_slope) {
-                            hex.blep.oversampleBlamp(); // TODO
+                            hex_blep.blamp(out + i, recip_dt * t, dt * (vert[j].slope - prev_value));
                         }
                     }
                 }
@@ -538,19 +599,21 @@ pub const Hexwave = struct {
         }
 
         // at this point we've written output and temp_output
-        if (num_samples >= hexblep.width) {
+        if (output.len >= hex_blep.width) {
             // the first half of temp overlaps the end of output, the second half will be the new start overlap
             var i: usize = 0;
-            while (i < hexblep.width) : (i += 1) {
-                output[num_samples - hexblep.width + i] += temp_output[i];
+            while (i < hex_blep.width) : (i += 1) {
+                output[output.len - hex_blep.width + i] += temp_output[i];
             }
             // copy from temp_output to buffer?
+            std.mem.copy(f32, hex.buffer, temp_output[hex_blep.width..]);
         } else {
             var i: usize = 0;
-            while (i < num_samples) : (i += 1) {
+            while (i < output.len) : (i += 1) {
                 output[i] += temp_output[i];
             }
             // copy from temp_output to buffer?
+            std.mem.copy(f32, hex.buffer, temp_output[output.len..]);
         }
 
         hex.time = t;

@@ -446,7 +446,7 @@ pub const Hexwave = struct {
         vert[1].time = hex.current.zero_wait * 0.5;
         vert[1].value = 0;
         vert[2].time = 0.5 * hex.current.peak_time + vert[1].time * (1 - hex.current.peak_time);
-        vert[2].value = 0;
+        vert[2].value = 1;
         vert[3].time = 0.5;
         vert[3].value = hex.current.half_height;
 
@@ -459,13 +459,13 @@ pub const Hexwave = struct {
         } else {
             var j: usize = 4;
             while (j <= 7) : (j += 1) {
-                vert[j].time = 0.5 - vert[j - 4].time;
+                vert[j].time = 0.5 + vert[j - 4].time;
                 vert[j].value = -vert[j - 4].value;
             }
         }
-
         vert[8].time = 1;
         vert[8].value = 0;
+
         {
             var j: usize = 0;
             while (j < 8) : (j += 1) {
@@ -492,7 +492,7 @@ pub const Hexwave = struct {
             // If the above fixup moved the endpoint away from 1.0, move it back,
             // along with any other vertices that got moved to the same time
             const time = vert[8].time;
-            var j: usize = 0;
+            var j: usize = 5;
             while (j <= 8) : (j += 1) {
                 if (vert[j].time == time) {
                     vert[j].time = 1.0;

@@ -240,25 +240,31 @@ pub const HexBlep = struct {
         const width = if (width_passed > MAX_BLEP_LENGTH) MAX_BLEP_LENGTH else width_passed;
 
         // compute BLEP and BLAMP by integrating windowed sinc
-        for (ramp) |_, i| {
-            var j: usize = 0;
-            while (j < 16) : (j += 1) {
-                const sinc_t: f32 = std.math.pi * @intToFloat(f32, i - half) / @intToFloat(f32, oversample);
-                const sinc: f32 = if (i == half) 1.0 else std.math.sin(sinc_t) / sinc_t;
-                const wt: f32 = 2.0 * std.math.pi * @intToFloat(f32, i) / @intToFloat(f32, n - 1);
-                const window: f32 = (0.355768 - 0.487396 * std.math.cos(wt) + 0.144232 * std.math.cos(2 * wt) - 0.012604 * std.math.cos(3 * wt)); // Nuttal
-                const value: f64 = @as(f64, window) * @as(f64, sinc);
-                integrate_impulse += value / 16;
-                integrate_step += integrate_impulse / 16;
+        {
+            var i: usize = 0;
+            while (i < n) : (i += 1) {
+                var j: usize = 0;
+                while (j < 16) : (j += 1) {
+                    const sinc_t: f32 = std.math.pi * (@intToFloat(f32, i) - @intToFloat(f32, half)) / @intToFloat(f32, oversample);
+                    const sinc: f32 = if (i == half) 1.0 else std.math.sin(sinc_t) / sinc_t;
+                    const wt: f32 = 2.0 * std.math.pi * @intToFloat(f32, i) / @intToFloat(f32, n - 1);
+                    const window: f32 = (0.355768 - 0.487396 * std.math.cos(wt) + 0.144232 * std.math.cos(2 * wt) - 0.012604 * std.math.cos(3 * wt)); // Nuttal
+                    const value: f64 = @as(f64, window) * @as(f64, sinc);
+                    integrate_impulse += value / 16;
+                    integrate_step += integrate_impulse / 16;
+                }
+                step[i] = @floatCast(f32, integrate_impulse);
+                ramp[i] = @floatCast(f32, integrate_step);
             }
-            step[i] = @floatCast(f32, integrate_impulse);
-            ramp[i] = @floatCast(f32, integrate_step);
         }
 
         // renormalize
-        for (ramp) |_, i| {
-            step[i] = step[i] * (1.0 / step[n - 1]);
-            ramp[i] = ramp[i] * (@intToFloat(f32, halfwidth) / ramp[n - 1]);
+        {
+            var i: usize = 0;
+            while (i < n) : (i += 1) {
+                step[i] = step[i] * (1.0 / step[n - 1]);
+                ramp[i] = ramp[i] * (@intToFloat(f32, halfwidth) / ramp[n - 1]);
+            }
         }
 
         // deinterleave to allow efficient interpolation e.g. w/SIMD
@@ -266,7 +272,7 @@ pub const HexBlep = struct {
             var j: usize = 0;
             while (j <= oversample) : (j += 1) {
                 var i: usize = 0;
-                while (i <= width) : (i += 1) {
+                while (i < width) : (i += 1) {
                     blep_buffer[j * width + i] = step[j + i * oversample];
                     blamp_buffer[j * width + i] = ramp[j + i * oversample];
                 }
@@ -281,13 +287,13 @@ pub const HexBlep = struct {
             while (j <= oversample) : (j += 1) {
                 // subtract step
                 var i: usize = halfwidth;
-                while (i <= width) : (i += 1) {
+                while (i < width) : (i += 1) {
                     blep_buffer[j * width + i] -= 1.0;
                 }
 
                 // subtract ramp
                 i = halfwidth;
-                while (i <= width) : (i += 1) {
+                while (i < width) : (i += 1) {
                     blamp_buffer[j * width + i] -= @intToFloat(f32, j + i * oversample - half) * (1.0 / @intToFloat(f32, oversample));
                 }
             }
@@ -320,7 +326,7 @@ pub const HexBlep = struct {
 
         const out = output[0..hex_blep.width];
         const d1 = data[slot .. slot + hex_blep.width];
-        const d2 = data[slot - 1 .. slot - 1 + hex_blep.width];
+        const d2 = data[slot + 1 .. slot + 1 + hex_blep.width];
 
         const lerpweight = time_since_transition * @intToFloat(f32, hex_blep.oversample) - @intToFloat(f32, slot);
         for (out) |*sample, i| {
@@ -519,7 +525,7 @@ pub const Hexwave = struct {
         var t = hex.time;
         var temp_output_buffer: [2 * MAX_BLEP_LENGTH]f32 = undefined;
         var temp_output = &temp_output_buffer;
-        // const buffered_length = @sizeOf(f32) * hex.hex_blep.width;
+        const buffered_length = hex.hex_blep.width;
         const dt = @fabs(frequency);
         const recip_dt = if (dt == 0.0) 0.0 else 1.0 / dt;
 
@@ -636,14 +642,14 @@ pub const Hexwave = struct {
                 output[output.len - hex_blep.width + i] += temp_output[i];
             }
             // copy from temp_output to buffer?
-            std.mem.copy(f32, &hex.buffer, temp_output[hex_blep.width..]);
+            std.mem.copy(f32, &hex.buffer, temp_output[hex_blep.width .. hex_blep.width + buffered_length]);
         } else {
             var i: usize = 0;
             while (i < output.len) : (i += 1) {
                 output[i] += temp_output[i];
             }
             // copy from temp_output to buffer?
-            std.mem.copy(f32, &hex.buffer, temp_output[output.len..]);
+            std.mem.copy(f32, &hex.buffer, temp_output[output.len .. hex_blep.width + buffered_length]);
         }
 
         hex.time = t;

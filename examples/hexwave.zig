@@ -114,10 +114,6 @@ pub fn update(app: *App, engine: *mach.Core) !void {
         }
     }
 
-    if (WavUnit.isFinished(app.hexwave_unit)) {
-        engine.close();
-    }
-
     if (builtin.cpu.arch != .wasm32) {
         const back_buffer_view = engine.swap_chain.?.getCurrentTextureView();
 

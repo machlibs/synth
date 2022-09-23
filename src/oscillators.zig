@@ -211,6 +211,129 @@ fn clamp(v: anytype, a: @TypeOf(v), b: @TypeOf(v)) @TypeOf(v) {
     return @minimum(a, @maximum(v, b));
 }
 
+/// Used to antialias waves
+const HexBlep = struct {
+    width: usize,
+    oversample: usize,
+    blep: []f32,
+    blamp: []f32,
+
+    // TODO: allow configuring / computing blep at comptime
+    // fn initComptime()
+
+    fn init(width: usize, oversample: usize, init_buffer: []f32, store_buffer: []f32) HexBlep {
+        const halfwidth = width / 2;
+        const half = halfwidth * oversample;
+        const blep_buffer_count = width * (oversample + 1);
+        const n = 2 * half + 1;
+        const step = init_buffer[0..n];
+        const ramp = init_buffer[n..];
+        const blep_buffer = store_buffer[0..blep_buffer_count];
+        const blamp_buffer = store_buffer[blep_buffer_count..];
+        var integrate_impulse: f64 = 0;
+        var integrate_step: f64 = 0;
+
+        // change this to a comptime variable
+        // if (width > STB_HEXWAVE_MAX_BLEP_LENGTH) width = STB_HEXWAVE_MAX_BLEP_LENGTH;
+
+        // compute BLEP and BLAMP by integrating windowed sinc
+        for (ramp) |_, i| {
+            var j: usize = 0;
+            while (j < 16) : (j += 1) {
+                const sinc_t: f32 = std.math.pi * (i - half) / oversample;
+                const sinc: f32 = if (i == half) 1.0 else std.math.sin(sinc_t) / sinc_t;
+                const wt: f32 = 2.0 * std.math.pi * i / (n - 1);
+                const window: f32 = (0.355768 - 0.487396 * std.math.cos(wt) + 0.144232 * std.math.cos(2 * wt) - 0.012604 * std.math.cos(3 * wt)); // Nuttal
+                const value: f64 = @as(f64, window) * @as(f64, sinc);
+                integrate_impulse += value / 16;
+                integrate_step += integrate_impulse / 16;
+            }
+            step[i] = @floatCast(f32, integrate_impulse);
+            ramp[i] = @floatCast(f32, integrate_step);
+        }
+
+        // renormalize
+        for (ramp) |_, i| {
+            step[i] = step[i] * (1.0 / step[n - 1]);
+            ramp[i] = ramp[i] * (halfwidth / ramp[n - 1]);
+        }
+
+        // deinterleave to allow efficient interpolation e.g. w/SIMD
+        {
+            var j: usize = 0;
+            while (j <= oversample) : (j += 1) {
+                var i: usize = 0;
+                while (i <= width) : (i += 1) {
+                    blep_buffer[j * width + i] = step[j + i * oversample];
+                    blamp_buffer[j * width + i] = ramp[j + i * oversample];
+                }
+            }
+        }
+
+        // subtract out the naive waveform; note we can't do this to the raw data
+        // above because we want the discontinuity to be in a different location
+        // for `j= 0` and `j=oversample` (which exists to provide something to interpolate against)
+        {
+            var j: usize = 0;
+            while (j <= oversample) : (j += 1) {
+                // subtract step
+                var i: usize = halfwidth;
+                while (i <= width) : (i += 1) {
+                    blep_buffer[j * width + i] -= 1.0;
+                }
+
+                // subtract ramp
+                i = halfwidth;
+                while (i <= width) : (i += 1) {
+                    blamp_buffer[j * width + i] -= (j + i * oversample - half) * (1.0 / oversample);
+                }
+            }
+        }
+
+        return HexBlep{
+            .width = width,
+            .oversample = oversample,
+            .blep = blep_buffer,
+            .blamp = blamp_buffer,
+        };
+    }
+
+    fn initAlloc(alloc: std.mem.Allocator, width: usize, oversample: usize) HexBlep {
+        const halfwidth = width / 2;
+        const half = halfwidth * oversample;
+        const blep_buffer_count = width * (oversample + 1);
+        const n = 2 * half + 1;
+
+        const init_buffer = try alloc.alloc(f32, n * 2);
+        defer alloc.free(init_buffer);
+        const store_buffer = try alloc.alloc(f32, blep_buffer_count * 2);
+
+        return init(width, oversample, init_buffer, store_buffer);
+    }
+
+    fn compute(hex_blep: HexBlep, output: []f32, time_since_transition: f32, scale: f32, data: []f32) void {
+        const slot = @floatToInt(i32, time_since_transition * hex_blep.oversample);
+        if (slot >= hex_blep.oversample) slot = hex_blep.oversample;
+
+        const out = output[0..hex_blep.width];
+        const d1 = data[slot .. slot + hex_blep.width];
+        const d2 = data[slot - 1 .. slot - 1 + hex_blep.width];
+
+        const lerpweight = time_since_transition * hex_blep.oversample - slot;
+        for (out) |*sample, i| {
+            sample.* = scale * (d1[i] + (d2[i] - d1[i]) * lerpweight);
+        }
+    }
+
+    fn blep(hex_blep: HexBlep, output: []f32, time_since_transition: f32, scale: f32) void {
+        blep.compute(output, time_since_transition, scale, hex_blep.blep);
+    }
+
+    fn blamp(hex_blep: HexBlep, output: []f32, time_since_transition: f32, scale: f32) void {
+        blep.compute(output, time_since_transition, scale, hex_blep.blamp);
+    }
+};
+
 /// A port of stb_hexwave v0.5. The following text is paraphrased from
 /// the original file.
 ///
@@ -249,7 +372,7 @@ pub const Hexwave = struct {
     oversample: usize,
     user_buffer: []f32,
     /// Lookup table for the blep function
-    blep: *OversampledBlepLike,
+    blep: *HexBlep,
 
     /// A convenience function wrapping `init()` that will allocate `user_buffer` for you
     pub fn initAlloc(alloc: std.mem.Allocator, width: usize, oversample: usize, parameters: Parameters) !Hexwave {
@@ -267,26 +390,7 @@ pub const Hexwave = struct {
     }
 
     /// Creates a hexwave oscillator. The `user_buffer` is a temporary buffer.
-    pub fn init(blep_: *OversampledBlepLike, parameters: Parameters) Hexwave {
-        // TODO: compute BLEP and BLAMP by integrating windowed sinc
-
-        // TODO: renormalize
-
-        // TODO: deinterleave to allow efficient interpolation e.g. w/SIMD
-
-        // TODO: subtract out the naive waveform; note we can't do this to the raw data
-        // above because we want the discontinuity to be in a different location
-        // for `j= 0` and `j=oversample` (which exists to provide something to interpolate against)
-        // loop
-        //     subtract step
-        //     subtract ramp
-
-        // TODO
-        // hexblep.blep = blep_buffer;
-        // hexblep.blamp = blamp_buffer;
-        // hexblep.width = width;
-        // hexblep.oversample = oversample;
-
+    pub fn init(blep: *HexBlep, parameters: Parameters) Hexwave {
         return Hexwave{
             .t = 0,
             .prev_dt = 0,
@@ -305,36 +409,6 @@ pub const Hexwave = struct {
             .zero_wait = into.zero_wait,
         };
     }
-
-    // TODO: make it better?
-    const OversampledBlepLike = struct {
-        width: usize,
-        oversample: usize,
-        blep: []f32,
-        blamp: []f32,
-
-        fn oversample(blep: OversampledBlepLike, output: []f32, time_since_transition: f32, scale: f32, data: []f32) void {
-            const slot = @floatToInt(i32, time_since_transition * blep.oversample);
-            if (slot >= blep.oversample) slot = blep.oversample;
-
-            const out = output[0..blep.width];
-            const d1 = data[slot .. slot + blep.width];
-            const d2 = data[slot - 1 .. slot - 1 + blep.width];
-
-            const lerpweight = time_since_transition * blep.oversample - slot;
-            for (out) |*sample, i| {
-                sample.* = scale * (d1[i] + (d2[i] - d1[i]) * lerpweight);
-            }
-        }
-
-        fn oversampleBlep(blep: OversampledBlepLike, output: []f32, time_since_transition: f32, scale: f32) void {
-            blep.oversample(output, time_since_transition, scale, blep.blep);
-        }
-
-        fn oversampleBlamp(blep: OversampledBlepLike, output: []f32, time_since_transition: f32, scale: f32) void {
-            blep.oversample(output, time_since_transition, scale, blep.blamp);
-        }
-    };
 
     const HexVert = struct {
         time: f32,

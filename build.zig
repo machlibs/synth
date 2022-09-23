@@ -7,6 +7,13 @@ pub const pkg = std.build.Pkg{
     .dependencies = null,
 };
 
+const Example = struct { name: []const u8, src: []const u8 };
+pub const examples = [_]Example{
+    .{ .name = "wasm4-apu", .src = "wasm4.zig" },
+    .{ .name = "wav", .src = "wav.zig" },
+    .{ .name = "hexwave", .src = "hexwave.zig" },
+};
+
 const deps = [_]fetch.Dependency{
     .{ .git = .{
         .name = "mach",
@@ -26,10 +33,11 @@ pub fn build(b: *std.build.Builder) !void {
     const test_step = b.step("test", "Run library tests");
     test_step.dependOn(&main_tests.step);
 
-    fetch.addStep(b, "example-wasm4-apu", "Builds the wasm4-apu example");
-    fetch.addStep(b, "run-example-wasm4-apu", "Runs the wasm4-apu example");
-    fetch.addStep(b, "example-wav", "Builds the wav example");
-    fetch.addStep(b, "run-example-wav", "Runs the wav example");
+    inline for (examples) |example| {
+        fetch.addStep(b, "example-" ++ example.name, "Builds the " ++ example.name ++ " example");
+        fetch.addStep(b, "run-example-" ++ example.name, "Runs the " ++ example.name ++ " example");
+    }
+
     try fetch.fetchAndBuild(b, "zig-deps", &deps, "compile.zig");
 }
 

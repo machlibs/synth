@@ -211,20 +211,23 @@ fn clamp(v: anytype, a: @TypeOf(v), b: @TypeOf(v)) @TypeOf(v) {
     return @minimum(a, @maximum(v, b));
 }
 
+// According to stb, ought to be good enough for anybody
+const MAX_BLEP_LENGTH = 64;
+
 /// Used to antialias waves
-const HexBlep = struct {
+pub const HexBlep = struct {
     width: usize,
     oversample: usize,
-    blep: []f32,
-    blamp: []f32,
+    blep_buffer: []f32,
+    blamp_buffer: []f32,
 
     // TODO: allow configuring / computing blep at comptime
     // fn initComptime()
 
-    fn init(width: usize, oversample: usize, init_buffer: []f32, store_buffer: []f32) HexBlep {
-        const halfwidth = width / 2;
+    pub fn init(width_passed: usize, oversample: usize, init_buffer: []f32, store_buffer: []f32) HexBlep {
+        const halfwidth = width_passed / 2;
         const half = halfwidth * oversample;
-        const blep_buffer_count = width * (oversample + 1);
+        const blep_buffer_count = width_passed * (oversample + 1);
         const n = 2 * half + 1;
         const step = init_buffer[0..n];
         const ramp = init_buffer[n..];
@@ -234,15 +237,15 @@ const HexBlep = struct {
         var integrate_step: f64 = 0;
 
         // change this to a comptime variable
-        // if (width > STB_HEXWAVE_MAX_BLEP_LENGTH) width = STB_HEXWAVE_MAX_BLEP_LENGTH;
+        const width = if (width_passed > MAX_BLEP_LENGTH) MAX_BLEP_LENGTH else width_passed;
 
         // compute BLEP and BLAMP by integrating windowed sinc
         for (ramp) |_, i| {
             var j: usize = 0;
             while (j < 16) : (j += 1) {
-                const sinc_t: f32 = std.math.pi * (i - half) / oversample;
+                const sinc_t: f32 = std.math.pi * @intToFloat(f32, i - half) / @intToFloat(f32, oversample);
                 const sinc: f32 = if (i == half) 1.0 else std.math.sin(sinc_t) / sinc_t;
-                const wt: f32 = 2.0 * std.math.pi * i / (n - 1);
+                const wt: f32 = 2.0 * std.math.pi * @intToFloat(f32, i) / @intToFloat(f32, n - 1);
                 const window: f32 = (0.355768 - 0.487396 * std.math.cos(wt) + 0.144232 * std.math.cos(2 * wt) - 0.012604 * std.math.cos(3 * wt)); // Nuttal
                 const value: f64 = @as(f64, window) * @as(f64, sinc);
                 integrate_impulse += value / 16;
@@ -255,7 +258,7 @@ const HexBlep = struct {
         // renormalize
         for (ramp) |_, i| {
             step[i] = step[i] * (1.0 / step[n - 1]);
-            ramp[i] = ramp[i] * (halfwidth / ramp[n - 1]);
+            ramp[i] = ramp[i] * (@intToFloat(f32, halfwidth) / ramp[n - 1]);
         }
 
         // deinterleave to allow efficient interpolation e.g. w/SIMD
@@ -285,7 +288,7 @@ const HexBlep = struct {
                 // subtract ramp
                 i = halfwidth;
                 while (i <= width) : (i += 1) {
-                    blamp_buffer[j * width + i] -= (j + i * oversample - half) * (1.0 / oversample);
+                    blamp_buffer[j * width + i] -= @intToFloat(f32, j + i * oversample - half) * (1.0 / @intToFloat(f32, oversample));
                 }
             }
         }
@@ -293,12 +296,12 @@ const HexBlep = struct {
         return HexBlep{
             .width = width,
             .oversample = oversample,
-            .blep = blep_buffer,
-            .blamp = blamp_buffer,
+            .blep_buffer = blep_buffer,
+            .blamp_buffer = blamp_buffer,
         };
     }
 
-    fn initAlloc(alloc: std.mem.Allocator, width: usize, oversample: usize) HexBlep {
+    pub fn initAlloc(alloc: std.mem.Allocator, width: usize, oversample: usize) !HexBlep {
         const halfwidth = width / 2;
         const half = halfwidth * oversample;
         const blep_buffer_count = width * (oversample + 1);
@@ -312,25 +315,25 @@ const HexBlep = struct {
     }
 
     fn compute(hex_blep: HexBlep, output: []f32, time_since_transition: f32, scale: f32, data: []f32) void {
-        const slot = @floatToInt(i32, time_since_transition * hex_blep.oversample);
+        var slot = @floatToInt(usize, time_since_transition * @intToFloat(f32, hex_blep.oversample));
         if (slot >= hex_blep.oversample) slot = hex_blep.oversample;
 
         const out = output[0..hex_blep.width];
         const d1 = data[slot .. slot + hex_blep.width];
         const d2 = data[slot - 1 .. slot - 1 + hex_blep.width];
 
-        const lerpweight = time_since_transition * hex_blep.oversample - slot;
+        const lerpweight = time_since_transition * @intToFloat(f32, hex_blep.oversample) - @intToFloat(f32, slot);
         for (out) |*sample, i| {
             sample.* = scale * (d1[i] + (d2[i] - d1[i]) * lerpweight);
         }
     }
 
-    fn blep(hex_blep: HexBlep, output: []f32, time_since_transition: f32, scale: f32) void {
-        blep.compute(output, time_since_transition, scale, hex_blep.blep);
+    pub fn blep(hex_blep: HexBlep, output: []f32, time_since_transition: f32, scale: f32) void {
+        hex_blep.compute(output, time_since_transition, scale, hex_blep.blep_buffer);
     }
 
-    fn blamp(hex_blep: HexBlep, output: []f32, time_since_transition: f32, scale: f32) void {
-        blep.compute(output, time_since_transition, scale, hex_blep.blamp);
+    pub fn blamp(hex_blep: HexBlep, output: []f32, time_since_transition: f32, scale: f32) void {
+        hex_blep.compute(output, time_since_transition, scale, hex_blep.blamp_buffer);
     }
 };
 
@@ -362,24 +365,53 @@ pub const Hexwave = struct {
     };
 
     /// Time
-    t: f32,
+    time: f32,
     prev_dt: f32,
     /// The current parameters
     current: Parameters,
     /// The parameters that are waiting to be applied
     pending: ?Parameters,
     /// Lookup table for the blep function
-    hex_blep: *HexBlep,
+    hex_blep: HexBlep,
+    /// Stores overlap between runs
+    buffer: [MAX_BLEP_LENGTH]f32,
 
     /// Creates a hexwave oscillator
-    pub fn init(hex_blep: *HexBlep, parameters: Parameters) Hexwave {
+    pub fn init(hex_blep: HexBlep, parameters: Parameters) Hexwave {
         return Hexwave{
-            .t = 0,
+            .time = 0,
             .prev_dt = 0,
             .current = parameters,
             .pending = null,
             .hex_blep = hex_blep,
+            .buffer = undefined,
         };
+    }
+
+    const HexwaveUnit = struct {
+        frequency: f32,
+        hexwave: Hexwave,
+
+        pub fn run(obj: *Unit, _: usize, _: [][]const f32, outputs: [][]f32) void {
+            var self = @ptrCast(*HexwaveUnit, @alignCast(@alignOf(HexwaveUnit), &obj.data));
+            self.hexwave.generateSamples(outputs[0], self.frequency / @intToFloat(f32, obj.sample_rate));
+        }
+    };
+
+    pub fn unit(hex_blep: HexBlep, parameters: Parameters, frequency: f32) Unit {
+        var obj = Unit{
+            .name = "Hexwave",
+            .run = HexwaveUnit.run,
+            .data = undefined,
+            .inputs = 0,
+            .outputs = 1,
+        };
+        var self = @ptrCast(*HexwaveUnit, @alignCast(@alignOf(HexwaveUnit), &obj.data));
+        self.* = HexwaveUnit{
+            .hexwave = Hexwave.init(hex_blep, parameters),
+            .frequency = frequency,
+        };
+        return obj;
     }
 
     /// Schedules a parameter change to occur on the next wave boundary to prevent aliasing.
@@ -413,13 +445,13 @@ pub const Hexwave = struct {
         vert[3].value = hex.current.half_height;
 
         if (hex.current.reflect) {
-            var j = 4;
+            var j: usize = 4;
             while (j <= 7) : (j += 1) {
                 vert[j].time = 1 - vert[7 - j].time;
                 vert[j].value = -vert[7 - j].value;
             }
         } else {
-            var j = 4;
+            var j: usize = 4;
             while (j <= 7) : (j += 1) {
                 vert[j].time = 0.5 - vert[j - 4].time;
                 vert[j].value = -vert[j - 4].value;
@@ -429,7 +461,7 @@ pub const Hexwave = struct {
         vert[8].time = 1;
         vert[8].value = 0;
         {
-            var j = 0;
+            var j: usize = 0;
             while (j < 8) : (j += 1) {
                 if (vert[j + 1].time <= vert[j].time + min_len) {
                     // Comment transcribed from stb_hexwave
@@ -450,7 +482,7 @@ pub const Hexwave = struct {
             }
         }
 
-        if (vert[9].time != 1.0) {
+        if (vert[8].time != 1.0) {
             // If the above fixup moved the endpoint away from 1.0, move it back,
             // along with any other vertices that got moved to the same time
             const time = vert[8].time;
@@ -481,15 +513,13 @@ pub const Hexwave = struct {
         return vert;
     }
 
-    // According to stb, ought to be good enough for anybody
-    const MAX_BLEP_LENGTH = 64;
-
     /// Generates samples into the `out` buffer. Divide the frequency by the sample_rate before passing it in as `frequency`.
     pub fn generateSamples(hex: *Hexwave, output: []f32, frequency: f32) void {
         const hex_blep = hex.hex_blep;
         var t = hex.time;
-        var temp_output: [2 * MAX_BLEP_LENGTH]f32 = undefined;
-        const buffered_length = @sizeOf(f32) * hex.hex_blep.width;
+        var temp_output_buffer: [2 * MAX_BLEP_LENGTH]f32 = undefined;
+        var temp_output = &temp_output_buffer;
+        // const buffered_length = @sizeOf(f32) * hex.hex_blep.width;
         const dt = @fabs(frequency);
         const recip_dt = if (dt == 0.0) 0.0 else 1.0 / dt;
 
@@ -518,10 +548,10 @@ pub const Hexwave = struct {
         std.mem.set(f32, temp_output, 0);
 
         if (output.len >= hex_blep.width) {
-            std.mem.copy(output, hex.buffer, buffered_length);
+            std.mem.copy(f32, output, &hex.buffer);
         } else {
             // if the output is shorter than hex_blep.width, we do all synthesis to temp_output
-            std.mem.copy(temp_output, hex.buffer, buffered_length);
+            std.mem.copy(f32, temp_output, &hex.buffer);
         }
 
         var pass: usize = 0;
@@ -556,12 +586,12 @@ pub const Hexwave = struct {
             // determine current segment
             var j: usize = 0;
             while (j < 8) : (j += 1) {
-                if (t < vert[j + 1].t) break;
+                if (t < vert[j + 1].time) break;
             }
 
             var i = i_0;
             while (true) {
-                while (t < vert[j + 1].t) : (i += 1) {
+                while (t < vert[j + 1].time) : (i += 1) {
                     // TODO: decipher this loop
                     if (i == i_1) break :pass;
                     out[i + halfw] += vert[j].value + vert[j].slope * (t - vert[j].time);
@@ -570,9 +600,9 @@ pub const Hexwave = struct {
                 // transition from lineseg starting at j to lineseg starting at j + 1
 
                 if (vert[j].time == vert[j + 1].time) {
-                    hex_blep.blep(out + i, recip_dt * (t - vert[j + 1].time), (vert[j + 1].value - vert[j].value));
+                    hex_blep.blep(out[i..], recip_dt * (t - vert[j + 1].time), (vert[j + 1].value - vert[j].value));
                 }
-                hex_blep.blamp(out + i, recip_dt * (t - vert[j + 1].time), dt * (vert[j + 1].slope - vert[j].slope));
+                hex_blep.blamp(out[i..], recip_dt * (t - vert[j + 1].time), dt * (vert[j + 1].slope - vert[j].slope));
 
                 j += 1;
 
@@ -588,10 +618,10 @@ pub const Hexwave = struct {
                         vert = hex.generateLineSegments(dt);
                         // the following never occurs with this oscillator but it makes the code work in more general cases
                         if (vert[j].value != prev_value) {
-                            hex_blep.blep(out + i, recip_dt * t, (vert[j].value - prev_value));
+                            hex_blep.blep(out[i..], recip_dt * t, (vert[j].value - prev_value));
                         }
                         if (vert[j].slope != prev_slope) {
-                            hex_blep.blamp(out + i, recip_dt * t, dt * (vert[j].slope - prev_value));
+                            hex_blep.blamp(out[i..], recip_dt * t, dt * (vert[j].slope - prev_value));
                         }
                     }
                 }
@@ -606,14 +636,14 @@ pub const Hexwave = struct {
                 output[output.len - hex_blep.width + i] += temp_output[i];
             }
             // copy from temp_output to buffer?
-            std.mem.copy(f32, hex.buffer, temp_output[hex_blep.width..]);
+            std.mem.copy(f32, &hex.buffer, temp_output[hex_blep.width..]);
         } else {
             var i: usize = 0;
             while (i < output.len) : (i += 1) {
                 output[i] += temp_output[i];
             }
             // copy from temp_output to buffer?
-            std.mem.copy(f32, hex.buffer, temp_output[output.len..]);
+            std.mem.copy(f32, &hex.buffer, temp_output[output.len..]);
         }
 
         hex.time = t;

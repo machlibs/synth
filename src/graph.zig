@@ -6,7 +6,7 @@ const Pool = @import("pool.zig").Pool;
 const Phasor = units.Phasor;
 const Output = units.Output;
 
-pub const AudioParam = struct{
+pub const AudioParam = struct {
     start_value: f32,
     end_value: f32,
     start_time: usize,
@@ -26,7 +26,7 @@ pub const AudioSource = struct {
     /// - `channel_count` - number of audio channels to output
     /// - `output` - planar buffer for audio output. This means each channel is a
     ///   contiguous block of memory
-    run: *const fn (source: *AudioSource, graph: *const Graph, time: usize, channel_count: usize, output: []f32),
+    run: *const fn (source: *AudioSource, graph: *const Graph, time: usize, channel_count: usize, output: []f32) void,
 };
 
 /// Interface for defining audio effects. Add as a field to custom nodes that define an audio effect.
@@ -44,7 +44,7 @@ pub const AudioEffect = struct {
     ///   contiguous block of memory
     /// - `output` - planar buffer for audio output. This means each channel is a
     ///   contiguous block of memory
-    run: *const fn(effect: *AudioEffect, graph: *const Graph, time: usize, channel_count: usize, input: []const f32, output: []f32),
+    run: *const fn (effect: *AudioEffect, graph: *const Graph, time: usize, channel_count: usize, input: []const f32, output: []f32) void,
 };
 
 /// Interface for defining audio sinks. Add as a field to custom nodes that define an audio sink.
@@ -60,7 +60,7 @@ pub const AudioSink = struct {
     /// - `channel_count` - number of audio channels to output
     /// - `input` - planar buffer for audio input. This means each channel is a
     ///   contiguous block of memory
-    run: *const fn(sink: *AudioSink, graph: *const Graph, time: usize, channel_count: usize, input: []f32),
+    run: *const fn (sink: *AudioSink, graph: *const Graph, time: usize, channel_count: usize, input: []f32) void,
 };
 
 pub const AudioNodeRef = union(enum) {

@@ -63,6 +63,23 @@ pub const AudioSink = struct {
     run: *const fn (sink: *AudioSink, graph: *const Graph, time: usize, channel_count: usize, input: []f32) void,
 };
 
+pub const AudioNodeInput = struct {};
+pub const AudioNodeOutput = struct {};
+
+pub const AudioNode = struct {
+    inputs: []AudioNodeInput,
+    outputs: []AudioNodeOutput,
+    params: []AudioParam,
+    settings: []AudioSetting,
+
+    channel_count: usize,
+    channel_count_mode: ChannelCountMode,
+    channel_interpretation: ChannelInterpretation,
+
+    fn input(node: *AudioNode, index: usize) *AudioNodeInput {}
+    fn output(node: *AudioNode, index: usize) *AudioNodeOutput {}
+};
+
 pub const AudioNodeRef = union(enum) {
     Source: *AudioSource,
     Effect: *AudioEffect,

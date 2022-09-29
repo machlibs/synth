@@ -6,86 +6,6 @@ const Pool = @import("pool.zig").Pool;
 const Phasor = units.Phasor;
 const Output = units.Output;
 
-pub const AudioParam = struct {
-    start_value: f32,
-    end_value: f32,
-    start_time: usize,
-    end_time: usize,
-};
-
-/// Interface for defining audio sources. Add as a field to custom nodes that define an audio source.
-pub const AudioSource = struct {
-    /// `run` points to a user-defined function for processing audio data.
-    /// This function shoud operate in real-time, meaning it should not allocate
-    /// memory, perform blocking i/o, or make syscalls.
-    /// - `source` - pointer to AudioSource struct. Use `@fieldParentPtr()` on
-    ///   this to get the struct it is embedded inside of.
-    /// - `graph` - pointer the audio graph, to get sample_rate, max block size,
-    ///   etc.
-    /// - `time` - current time in samples
-    /// - `channel_count` - number of audio channels to output
-    /// - `output` - planar buffer for audio output. This means each channel is a
-    ///   contiguous block of memory
-    run: *const fn (source: *AudioSource, graph: *const Graph, time: usize, channel_count: usize, output: []f32) void,
-};
-
-/// Interface for defining audio effects. Add as a field to custom nodes that define an audio effect.
-pub const AudioEffect = struct {
-    /// `run` points to a user-defined function for processing audio data.
-    /// This function shoud operate in real-time, meaning it should not allocate
-    /// memory, perform blocking i/o, or make syscalls.
-    /// - `source` - pointer to AudioSource struct. Use `@fieldParentPtr()` on
-    ///   this to get the struct it is embedded inside of.
-    /// - `graph` - pointer the audio graph, to get sample_rate, max block size,
-    ///   etc.
-    /// - `time` - current time in samples
-    /// - `channel_count` - number of audio channels to output
-    /// - `input` - planar buffer for audio input. This means each channel is a
-    ///   contiguous block of memory
-    /// - `output` - planar buffer for audio output. This means each channel is a
-    ///   contiguous block of memory
-    run: *const fn (effect: *AudioEffect, graph: *const Graph, time: usize, channel_count: usize, input: []const f32, output: []f32) void,
-};
-
-/// Interface for defining audio sinks. Add as a field to custom nodes that define an audio sink.
-pub const AudioSink = struct {
-    /// `run` points to a user-defined function for processing audio data.
-    /// This function shoud operate in real-time, meaning it should not allocate
-    /// memory, perform blocking i/o, or make syscalls.
-    /// - `source` - pointer to AudioSource struct. Use `@fieldParentPtr()` on
-    ///   this to get the struct it is embedded inside of.
-    /// - `graph` - pointer the audio graph, to get sample_rate, max block size,
-    ///   etc.
-    /// - `time` - current time in samples
-    /// - `channel_count` - number of audio channels to output
-    /// - `input` - planar buffer for audio input. This means each channel is a
-    ///   contiguous block of memory
-    run: *const fn (sink: *AudioSink, graph: *const Graph, time: usize, channel_count: usize, input: []f32) void,
-};
-
-pub const AudioNodeInput = struct {};
-pub const AudioNodeOutput = struct {};
-
-pub const AudioNode = struct {
-    inputs: []AudioNodeInput,
-    outputs: []AudioNodeOutput,
-    params: []AudioParam,
-    settings: []AudioSetting,
-
-    channel_count: usize,
-    channel_count_mode: ChannelCountMode,
-    channel_interpretation: ChannelInterpretation,
-
-    fn input(node: *AudioNode, index: usize) *AudioNodeInput {}
-    fn output(node: *AudioNode, index: usize) *AudioNodeOutput {}
-};
-
-pub const AudioNodeRef = union(enum) {
-    Source: *AudioSource,
-    Effect: *AudioEffect,
-    Sink: *AudioSink,
-};
-
 /// An interface for units
 pub const Unit = struct {
     name: []const u8,
@@ -494,7 +414,7 @@ fn expectSlicesApproxEqAbs(comptime T: type, expected: []T, actual: []T, toleran
     for (expected) |_, i| {
         if (!std.math.approxEqAbs(T, expected[i], actual[i], tolerance)) {
             std.debug.print("index {} incorrect. expected {any}, found {any}\n", .{ i, expected[i], actual[i] });
-            return error.TextExpectedEqual;
+            return error.TestExpectedEqual;
         }
     }
 }

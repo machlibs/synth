@@ -3,6 +3,7 @@ comptime {
     _ = env;
     _ = graph;
     _ = wav;
+    _ = @import("AudioContext.zig");
 }
 
 pub const osc = @import("oscillators.zig");

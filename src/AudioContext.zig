@@ -5,7 +5,7 @@ pub const AudioSettingType = union(enum) {
     Bool,
     Integer,
     Float,
-    Enumeration: [][]const u8,
+    Enumeration: []const []const u8,
 };
 
 /// The definition of a single parameter on an AudioNode
@@ -52,13 +52,13 @@ pub const AudioNodeDefinition = struct {
     /// The short name of the parameter. This should clearly identify the parameter
     short_name: []const u8,
     /// Block-accurate control values
-    settings: []AudioSettingDefinition,
+    settings: []const AudioSettingDefinition,
     /// Sample-accurate control values
-    params: []AudioParamDefinition,
+    params: []const AudioParamDefinition,
     /// Inputs to the node. Multiple outputs can connect to one input.
-    inputs: []AudioNodeInput,
+    inputs: []const AudioNodeInput,
     /// Outputs of the node. Outputs can be connected to multiple inputs.
-    outputs: []AudioNodeOutput,
+    outputs: []const AudioNodeOutput,
 };
 
 pub const AudioContext = struct {
@@ -104,7 +104,10 @@ pub const AudioContext = struct {
     };
 
     pub const Pin = struct {
-        data: union(enum) { output: usize, setting: usize, param: usize },
+        data: union(enum) {
+            setting: usize,
+            param: usize,
+        },
         node_id: NodeID,
     };
 
@@ -114,11 +117,18 @@ pub const AudioContext = struct {
     }) AudioContext {
         return AudioContext{
             .block_size = options.block_size,
-            .settings = std.ArrayList(AudioNodeDefinition).init(allocator),
-            .inputs = std.ArrayList(usize).init(allocator),
-            .outputs = std.ArrayList(usize).init(allocator),
-            .nodes = std.ArrayList(AudioNodeDefinition).init(allocator),
+            .definitions = std.ArrayList(AudioNodeDefinition).init(allocator),
+            .settings = std.ArrayList(SettingValue).init(allocator),
+            .pins = std.AutoHashMap(PinID, Pin).init(allocator),
+            .nodes = std.AutoHashMap(NodeID, Node).init(allocator),
         };
+    }
+
+    pub fn deinit(ctx: *AudioContext) void {
+        ctx.definitions.deinit();
+        ctx.settings.deinit();
+        ctx.pins.deinit();
+        ctx.nodes.deinit();
     }
 
     /// Adds a node definition to the audio context. The slices for `settings`, `params`, `inputs`, and `outputs`
@@ -126,7 +136,7 @@ pub const AudioContext = struct {
     /// Returns a definition id for the node definition.
     pub fn addNodeDefinition(ctx: *AudioContext, definition: AudioNodeDefinition) !NodeType {
         try ctx.definitions.append(definition);
-        return ctx.definitions.len - 1;
+        return .{ .id = ctx.definitions.items.len - 1 };
     }
 
     pub fn createNode(ctx: *AudioContext, node_type: NodeType) !NodeID {
@@ -134,6 +144,12 @@ pub const AudioContext = struct {
         const node_def = ctx.definitions.items[node_type.id];
         const settings_start = if (node_def.settings.len == 0) std.math.maxInt(usize) else ctx.definitions.items.len;
         const pin_index = ctx.pins.items.len;
+        const pin_id = PinID{ .id = pin_index };
+        ctx.settings.appendNTimes(SettingValue, node_def.settings.len);
+        for (node_def.settings) |setting, i| {
+            ctx.settings.items[settings_start + i] = setting.default;
+            try ctx.pins.put(pin_id, Pin{ .setting = settings_start + i });
+        }
     }
 
     pub fn setSetting(ctx: *AudioContext, node_id: NodeID, setting: usize, value: Setting) !void {
@@ -159,17 +175,17 @@ pub const AudioContext = struct {
 };
 
 test "AudioContext add node definition" {
-    var ctx = try AudioContext.init(std.testing.allocator, .{});
-    defer ctx.deinit(std.testing.allocator);
+    var ctx = AudioContext.init(std.testing.allocator, .{});
+    defer ctx.deinit();
 
     const Oscillator = try ctx.addNodeDefinition(.{
         .name = "oscillator",
         .short_name = "OSC",
-        .settings = &.{
+        .settings = &[_]AudioSettingDefinition{
             .{
                 .name = "type",
                 .short_name = "TYPE",
-                .type = .{ .Enumeration = &.{
+                .type = .{ .Enumeration = &[_][]const u8{
                     "None",
                     "Sine",
                     "FastSine",
@@ -180,7 +196,7 @@ test "AudioContext add node definition" {
                 } },
             },
         },
-        .params = &.{
+        .params = &[_]AudioParamDefinition{
             .{
                 .name = "frequency",
                 .short_name = "FREQ",
@@ -214,5 +230,5 @@ test "AudioContext add node definition" {
         .outputs = &.{.{ .channel_count = 1 }},
     });
 
-    const osc = ctx.createNode(Oscillator);
+    _ = Oscillator;
 }

@@ -1,11 +1,17 @@
 const std = @import("std");
 
-pub const AudioSettingType = union(enum) {
-    None,
+pub const AudioSettingType = enum {
     Bool,
     Integer,
     Float,
-    Enumeration: []const []const u8,
+    Enumeration,
+};
+
+pub const AudioSettingValue = union {
+    Bool: bool,
+    Integer: i32,
+    Float: f32,
+    Enumeration: u32,
 };
 
 /// The definition of a single parameter on an AudioNode
@@ -19,7 +25,15 @@ pub const AudioSettingDefinition = struct {
     /// - Int: a signed 32-bit integer
     /// - Enum: a set of named constants
     /// - Bool: true or false
-    type: AudioSettingType,
+    type: union(AudioSettingType) {
+        Bool,
+        Integer,
+        Float,
+        Enumeration: []const []const u8,
+    },
+    /// The default value of the audio setting. This should match the type
+    /// of the setting.
+    default: AudioSettingValue,
 };
 
 pub const AudioParamDefinition = struct {
@@ -27,8 +41,6 @@ pub const AudioParamDefinition = struct {
     name: []const u8,
     /// The short name of the parameter. This should identify the parameter. Example: "FREQ"
     short_name: []const u8,
-    ///  The unit of the parameter.
-    unit: ?[]const u8 = null,
     /// The default value of the parameter. This is used if no value is explicitly set
     default: f32,
     /// The minimum value of the parameter
@@ -45,8 +57,21 @@ pub const AudioNodeOutput = struct {
     channel_count: usize,
 };
 
+pub const AudioProcessInputs = struct {
+    time: u64,
+    sample_rate: u64,
+    settings: []const AudioSettingValue,
+    params: []const []const f32,
+    signal: []const []const f32,
+};
+
+pub const AudioProcessOutput = struct {
+    signal: [][]f32,
+};
+
 /// Defines a specific type of audio node
 pub const AudioNodeDefinition = struct {
+    process: *const fn (AudioProcessInputs, AudioProcessOutput) void,
     /// The name of the node. This should clearly describe the node
     name: []const u8,
     /// The short name of the parameter. This should clearly identify the parameter
@@ -63,29 +88,13 @@ pub const AudioNodeDefinition = struct {
 
 pub const AudioContext = struct {
     block_size: usize,
-
+    node_count: usize = 0,
     definitions: std.ArrayList(AudioNodeDefinition),
-
-    settings: std.ArrayList(SettingValue),
     pins: std.AutoHashMap(PinID, Pin),
     nodes: std.AutoHashMap(NodeID, Node),
 
     const NodeType = struct {
         id: usize,
-    };
-
-    pub const SettingValue = union {
-        Bool: bool,
-        Integer: i32,
-        Float: f32,
-        Enumeration: u32,
-    };
-
-    pub const Setting = union(AudioSettingType) {
-        Bool: bool,
-        Integer: i32,
-        Float: f32,
-        Enumeration: u32,
     };
 
     const NodeID = struct {
@@ -94,21 +103,16 @@ pub const AudioContext = struct {
 
     pub const Node = struct {
         type_id: usize, // 8
-        settings_start: usize, // 8
-        inputs_start: usize, // 8
-        outputs_start: usize, // 8
     };
 
     const PinID = struct {
-        id: usize,
+        node_id: usize,
+        pin: usize,
     };
 
-    pub const Pin = struct {
-        data: union(enum) {
-            setting: usize,
-            param: usize,
-        },
-        node_id: NodeID,
+    pub const Pin = union(enum) {
+        setting: AudioSettingValue,
+        param: usize,
     };
 
     /// Initialize the AudioContext.
@@ -118,7 +122,6 @@ pub const AudioContext = struct {
         return AudioContext{
             .block_size = options.block_size,
             .definitions = std.ArrayList(AudioNodeDefinition).init(allocator),
-            .settings = std.ArrayList(SettingValue).init(allocator),
             .pins = std.AutoHashMap(PinID, Pin).init(allocator),
             .nodes = std.AutoHashMap(NodeID, Node).init(allocator),
         };
@@ -126,7 +129,6 @@ pub const AudioContext = struct {
 
     pub fn deinit(ctx: *AudioContext) void {
         ctx.definitions.deinit();
-        ctx.settings.deinit();
         ctx.pins.deinit();
         ctx.nodes.deinit();
     }
@@ -142,17 +144,22 @@ pub const AudioContext = struct {
     pub fn createNode(ctx: *AudioContext, node_type: NodeType) !NodeID {
         if (node_type.id > ctx.definitions.items.len) return error.InvalidNodeType;
         const node_def = ctx.definitions.items[node_type.id];
-        const settings_start = if (node_def.settings.len == 0) std.math.maxInt(usize) else ctx.definitions.items.len;
-        const pin_index = ctx.pins.items.len;
-        const pin_id = PinID{ .id = pin_index };
-        ctx.settings.appendNTimes(SettingValue, node_def.settings.len);
+        const node_index = ctx.node_count;
+        ctx.node_count += 1;
         for (node_def.settings) |setting, i| {
-            ctx.settings.items[settings_start + i] = setting.default;
-            try ctx.pins.put(pin_id, Pin{ .setting = settings_start + i });
+            try ctx.pins.put(
+                PinID{ .node_id = node_index, .pin = i },
+                Pin{ .setting = setting.default },
+            );
         }
+        const node_id = NodeID{ .id = node_index };
+        try ctx.nodes.put(node_id, Node{
+            .type_id = node_type.id,
+        });
+        return node_id;
     }
 
-    pub fn setSetting(ctx: *AudioContext, node_id: NodeID, setting: usize, value: Setting) !void {
+    pub fn setSetting(ctx: *AudioContext, node_id: NodeID, setting: usize, value: AudioSettingValue) !void {
         const node = ctx.nodes.get(node_id) orelse return error.NoSuchNode;
         const node_def = ctx.definitions.items[node.type_id];
         if (setting >= node_def.settings.len) return error.NoSuchSetting;
@@ -160,25 +167,58 @@ pub const AudioContext = struct {
         ctx.settings.items[node.settings_start + setting] = value;
     }
 
-    pub fn getSetting(ctx: *AudioContext, node_id: NodeID, setting: usize) !Setting {
+    pub fn setEnumByName(ctx: *AudioContext, node_id: NodeID, setting: usize, tag: []const u8) !void {
         const node = ctx.nodes.get(node_id) orelse return error.NoSuchNode;
         const node_def = ctx.definitions.items[node.type_id];
         if (setting >= node_def.settings.len) return error.NoSuchSetting;
-        const value = ctx.settings.items[node.settings_start + setting];
-        return switch (node_def.settings[setting].type) {
-            .Bool => .{ .Bool = value.Bool },
-            .Integer => .{ .Integer = value.Integer },
-            .Float => .{ .Float = value.Float },
-            .Enumeration => .{ .Enumeration = value.Enumeration },
-        };
+        if (node_def.settings[setting].type != .Enumeration) return error.IncorrectType;
+        for (node_def.settings[setting].type.Enumeration) |enum_tag, i| {
+            if (std.mem.eql(u8, enum_tag, tag)) {
+                const pin = ctx.pins.getPtr(.{ .node_id = node_id.id, .pin = setting }) orelse return error.NoSuchPin;
+                pin.*.setting.Enumeration = @intCast(u32, i);
+                return;
+            }
+        }
+        return error.UnknownEnumeration;
+    }
+
+    pub fn getSetting(ctx: *AudioContext, node_id: NodeID, setting: usize) ?AudioSettingValue {
+        const node = ctx.nodes.get(node_id) orelse return null;
+        const node_def = ctx.definitions.items[node.type_id];
+        if (setting >= node_def.settings.len) return null;
+        const pin = ctx.pins.getPtr(.{ .node_id = node_id.id, .pin = setting }) orelse return null;
+        switch (pin.*) {
+            .setting => |set| return set,
+            else => return null,
+        }
     }
 };
+
+fn oscillator_process(inputs: AudioProcessInputs, output: AudioProcessOutput) void {
+    const waveform = inputs.settings[0].Enumeration;
+    const sample_rate = @intToFloat(f32, inputs.sample_rate);
+    for (output.signal) |channel| {
+        for (channel) |*sample, i| {
+            sample.* = switch (waveform) {
+                1 => sine: {
+                    // TODO: bias and detune
+                    const time = @intToFloat(f32, inputs.time + i);
+                    const frequency = inputs.params[0][i];
+                    const gain = inputs.params[2][i];
+                    break :sine std.math.sin(frequency * 2.0 * std.math.pi * time / sample_rate) * gain;
+                },
+                else => 0,
+            };
+        }
+    }
+}
 
 test "AudioContext add node definition" {
     var ctx = AudioContext.init(std.testing.allocator, .{});
     defer ctx.deinit();
 
     const Oscillator = try ctx.addNodeDefinition(.{
+        .process = oscillator_process,
         .name = "oscillator",
         .short_name = "OSC",
         .settings = &[_]AudioSettingDefinition{
@@ -194,6 +234,7 @@ test "AudioContext add node definition" {
                     "Triangle",
                     "Custom",
                 } },
+                .default = .{ .Enumeration = 0 },
             },
         },
         .params = &[_]AudioParamDefinition{
@@ -230,5 +271,8 @@ test "AudioContext add node definition" {
         .outputs = &.{.{ .channel_count = 1 }},
     });
 
-    _ = Oscillator;
+    const osc = try ctx.createNode(Oscillator);
+    try ctx.setEnumByName(osc, 0, "Sine");
+    const enum_value = ctx.getSetting(osc, 0) orelse return error.MissingSetting;
+    try std.testing.expectEqual(.{ .Enumeration = 1 }, enum_value);
 }

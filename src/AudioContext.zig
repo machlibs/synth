@@ -49,12 +49,34 @@ pub const AudioParamDefinition = struct {
     maximum: f32,
 };
 
-pub const AudioNodeInput = struct {
-    channel_count: usize,
+pub const SpeakerChannelLayout = enum(usize) {
+    /// One channel
+    Mono = 1,
+    /// Two channels, Left and Right
+    Stereo = 2,
+    /// Four channels, Left, Right, Back Left, Back Right
+    Quad = 4,
+    /// Six channels, Left, Right, Front Center, Low Frequency, Back Left, Back Right
+    Surround5_1 = 6,
 };
 
-pub const AudioNodeOutput = struct {
-    channel_count: usize,
+pub const ChannelInterpretation = enum {
+    Speakers,
+    Discrete,
+};
+
+pub const ChannelCount = union(enum) {
+    /// Use the largest channel count connected
+    Max,
+    /// Use a specific channel count
+    Explicit: usize,
+    /// Use the largest channel count, with a defined upper bound
+    ClampedMax: usize,
+};
+
+pub const AudioChannelDefinition = struct {
+    interpretation: ChannelInterpretation,
+    channel_count: ChannelCount,
 };
 
 pub const AudioProcessInputs = struct {
@@ -80,18 +102,20 @@ pub const AudioNodeDefinition = struct {
     settings: []const AudioSettingDefinition,
     /// Sample-accurate control values
     params: []const AudioParamDefinition,
-    /// Inputs to the node. Multiple outputs can connect to one input.
-    inputs: []const AudioNodeInput,
-    /// Outputs of the node. Outputs can be connected to multiple inputs.
-    outputs: []const AudioNodeOutput,
+    /// How the node interprets input channels.
+    input: AudioChannelDefinition,
+    /// How the node decides on output channels
+    output: AudioChannelDefinition,
 };
 
 pub const AudioContext = struct {
     block_size: usize,
     node_count: usize = 0,
+    current_time: usize = 0,
     definitions: std.ArrayList(AudioNodeDefinition),
     pins: std.AutoHashMap(PinID, Pin),
     nodes: std.AutoHashMap(NodeID, Node),
+    auto_nodes: std.ArrayList(NodeID),
 
     const NodeType = struct {
         id: usize,
@@ -124,13 +148,30 @@ pub const AudioContext = struct {
             .definitions = std.ArrayList(AudioNodeDefinition).init(allocator),
             .pins = std.AutoHashMap(PinID, Pin).init(allocator),
             .nodes = std.AutoHashMap(NodeID, Node).init(allocator),
+            .auto_nodes = std.ArrayList(PinID).init(allocator),
         };
     }
 
+    /// Deinitialize the AudioContext. This frees the list of definitions and the pin and node hashmaps.
     pub fn deinit(ctx: *AudioContext) void {
         ctx.definitions.deinit();
         ctx.pins.deinit();
         ctx.nodes.deinit();
+    }
+
+    const AudioInput = struct {
+        sample_rate: usize,
+        channels: [][]const f32,
+    };
+
+    const AudioOutput = struct {
+        channels: [][]f32,
+    };
+
+    pub fn process(ctx: *AudioContext, input: AudioInput, output: AudioOutput) void {
+        for (ctx.auto_nodes.items) |auto_node| {
+            // TODO: do a breadth first search
+        }
     }
 
     /// Adds a node definition to the audio context. The slices for `settings`, `params`, `inputs`, and `outputs`
@@ -141,6 +182,7 @@ pub const AudioContext = struct {
         return .{ .id = ctx.definitions.items.len - 1 };
     }
 
+    /// Create a node based on a previously defined NodeType.
     pub fn createNode(ctx: *AudioContext, node_type: NodeType) !NodeID {
         if (node_type.id > ctx.definitions.items.len) return error.InvalidNodeType;
         const node_def = ctx.definitions.items[node_type.id];

@@ -1,5 +1,9 @@
 const std = @import("std");
 
+const Context = struct {
+    sample_rate: usize,
+};
+
 const Output = struct {
     prev: ?*Output,
     next: ?*Output,
@@ -9,9 +13,9 @@ const Node = struct {
     input_list: Output,
     bus_in: [][]f32, // used for mixing inputs
     bus_out: [][]f32, // where outputs is stored
-    process: *const fn (*Node) void,
+    process: *const fn (*Node, Context) void,
 
-    pub fn init(process: *const fn (*Node) void, bus_in: [][]f32, bus_out: [][]f32) @This() {
+    pub fn init(process: *const fn (*Node, Context) void, bus_in: [][]f32, bus_out: [][]f32) @This() {
         return @This(){
             .input_list = .{ .next = null, .prev = null },
             .bus_in = bus_in,
@@ -37,7 +41,7 @@ const Node = struct {
         input_node.input_list.next = &output_node.input_list;
     }
 
-    pub fn pull(node: *Node) void {
+    pub fn pull(node: *Node, ctx: Context) void {
         for (node.bus_in) |channel| {
             for (channel) |*sample| {
                 sample.* = 0;
@@ -46,7 +50,7 @@ const Node = struct {
         var next_input = node.input_list.next;
         while (next_input) |input| {
             const input_node = @fieldParentPtr(Node, "input_list", input);
-            input_node.pull();
+            input_node.pull(ctx);
             for (node.bus_in) |channel, c| {
                 for (channel) |*sample, s| {
                     sample.* += input_node.bus_out[c][s];
@@ -54,11 +58,11 @@ const Node = struct {
             }
             next_input = input.next;
         }
-        node.process(node);
+        node.process(node, ctx);
     }
 };
 
-fn cosProcess(node: *Node) void {
+fn cosProcess(node: *Node, _: Context) void {
     for (node.bus_out) |channel| {
         for (channel) |*sample, s| {
             sample.* = @cos(@intToFloat(f32, s));
@@ -66,7 +70,7 @@ fn cosProcess(node: *Node) void {
     }
 }
 
-fn sineProcess(node: *Node) void {
+fn sineProcess(node: *Node, _: Context) void {
     for (node.bus_out) |channel| {
         for (channel) |*sample, s| {
             sample.* = @sin(@intToFloat(f32, s));
@@ -74,7 +78,7 @@ fn sineProcess(node: *Node) void {
     }
 }
 
-fn testProcess(node: *Node) void {
+fn testProcess(node: *Node, _: Context) void {
     for (node.bus_in) |channel, c| {
         for (channel) |sample, s| {
             node.bus_out[c][s] = sample;
@@ -85,6 +89,8 @@ fn testProcess(node: *Node) void {
 
 test "graph minimal" {
     const alloc = std.testing.allocator;
+    const ctx = Context{ .sample_rate = 1 };
+
     var buffer1 = try alloc.alloc(f32, 128 * 2);
     defer alloc.free(buffer1);
     var node1 = Node.init(sineProcess, &.{buffer1[0..128]}, &.{buffer1[128..]});
@@ -95,7 +101,7 @@ test "graph minimal" {
 
     node1.connectOutputTo(&node2);
 
-    node2.pull();
+    node2.pull(ctx);
 
     var sineBuffer: [128]f32 = undefined;
     for (sineBuffer) |*sample, s| {
@@ -115,7 +121,7 @@ test "graph minimal" {
 
     node3.connectOutputTo(&node2);
 
-    node2.pull();
+    node2.pull(ctx);
 
     var cosBuffer: [128]f32 = undefined;
     for (cosBuffer) |*sample, s| {

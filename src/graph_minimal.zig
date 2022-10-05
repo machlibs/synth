@@ -15,6 +15,8 @@ const Node = struct {
     bus_out: [][]f32, // where outputs is stored
     process: *const fn (*Node, Context) void,
 
+    const NoChannel = &[0][]f32{};
+
     pub fn init(process: *const fn (*Node, Context) void, bus_in: [][]f32, bus_out: [][]f32) @This() {
         return @This(){
             .input_list = .{ .next = null, .prev = null },
@@ -91,9 +93,9 @@ test "graph minimal" {
     const alloc = std.testing.allocator;
     const ctx = Context{ .sample_rate = 1 };
 
-    var buffer1 = try alloc.alloc(f32, 128 * 2);
+    var buffer1 = try alloc.alloc(f32, 128);
     defer alloc.free(buffer1);
-    var node1 = Node.init(sineProcess, &.{buffer1[0..128]}, &.{buffer1[128..]});
+    var node1 = Node.init(sineProcess, Node.NoChannel, &.{buffer1[0..128]});
 
     var buffer2 = try alloc.alloc(f32, 128 * 2);
     defer alloc.free(buffer2);
@@ -115,9 +117,9 @@ test "graph minimal" {
 
     node1.disconnectOutput();
 
-    var buffer3 = try alloc.alloc(f32, 128 * 2);
+    var buffer3 = try alloc.alloc(f32, 128);
     defer alloc.free(buffer3);
-    var node3 = Node.init(cosProcess, &.{buffer3[0..128]}, &.{buffer3[128..]});
+    var node3 = Node.init(cosProcess, Node.NoChannel, &.{buffer3[0..128]});
 
     node3.connectOutputTo(&node2);
 
